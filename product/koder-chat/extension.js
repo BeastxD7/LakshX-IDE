@@ -357,8 +357,20 @@ class AgentViewProvider {
   }
 }
 
-function activate(context) {
+async function activate(context) {
   const provider = new AgentViewProvider(context);
+
+  // Koder ships its own agent — make sure the leftover built-in chat surfaces
+  // stay off even where extension configurationDefaults don't reach (packaged
+  // builds' setup views). One-time, respects later manual changes.
+  if (!context.globalState.get("koder.chatDisabled.v1")) {
+    const cfg = vscode.workspace.getConfiguration();
+    try {
+      await cfg.update("chat.disableAIFeatures", true, vscode.ConfigurationTarget.Global);
+      await cfg.update("chat.commandCenter.enabled", false, vscode.ConfigurationTarget.Global);
+    } catch {}
+    context.globalState.update("koder.chatDisabled.v1", true);
+  }
 
   const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 1000);
   statusItem.text = "✦ Koder";

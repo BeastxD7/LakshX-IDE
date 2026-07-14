@@ -59,6 +59,27 @@ for (const rel of htmlFiles) {
   console.log(`css injected → ${rel}`);
 }
 
+// 2b. replace the VS Code letterpress watermark with the Koder spark
+const lpSrcDir = join(root, "product", "koder-ui");
+const lpTargets = [
+  "src/vs/workbench/browser/parts/editor/media",
+  "out/vs/workbench/browser/parts/editor/media",
+  "out/media",
+];
+for (const dir of lpTargets) {
+  const abs = join(upstream, dir);
+  if (!existsSync(abs)) continue;
+  for (const variant of ["dark", "hcDark"]) {
+    const dst = join(abs, `letterpress-${variant}.svg`);
+    if (existsSync(dst)) cpSync(join(lpSrcDir, "letterpress-dark.svg"), dst);
+  }
+  for (const variant of ["light", "hcLight"]) {
+    const dst = join(abs, `letterpress-${variant}.svg`);
+    if (existsSync(dst)) cpSync(join(lpSrcDir, "letterpress-light.svg"), dst);
+  }
+  console.log(`letterpress → ${dir}`);
+}
+
 // 3. build-system tweak: Koder ships no copilot extension — the packaging
 // pipeline's ripgrep-shim step must skip instead of throwing.
 const copilotBuild = join(upstream, "build", "lib", "copilot.ts");
