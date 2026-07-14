@@ -55,6 +55,10 @@
       {
         "command": "koder.openFeedbackLog",
         "title": "Koder: Open Feedback Log"
+      },
+      {
+        "command": "koder.addSelectionToChat",
+        "title": "Add to Koder Chat"
       }
     ],
     "keybindings": [
@@ -81,6 +85,12 @@
         {
           "command": "koder.openAgent",
           "group": "navigation@100"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "koder.addSelectionToChat",
+          "group": "koder@1"
         }
       ]
     },

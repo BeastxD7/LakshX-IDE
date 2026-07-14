@@ -160,6 +160,101 @@ function saveProviderState(keys, defaultModel) {
   fs.writeFileSync(providersFile(), JSON.stringify(cfg, null, 2));
 }
 
+// ---------- @-mention file search + attachment (chip) expansion ----------
+// Caps mirror the agent's own read_file tool (agent/src/tools.ts: 800-line
+// default, 48k-char clip) so a chip never hands the model more context than
+// a normal tool call would.
+const MAX_ATTACH_LINES = 800;
+const MAX_ATTACH_CHARS = 48_000;
+
+function workspaceRoot() {
+  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+}
+
+function toWorkspaceRelative(absPath) {
+  const root = workspaceRoot();
+  return root && absPath.startsWith(root) ? path.relative(root, absPath).split(path.sep).join("/") : absPath;
+}
+
+/**
+ * Resolve a chip's path to an absolute, readable path. Relative paths are
+ * joined to the workspace root and rejected if they'd escape it (mirrors
+ * the "openLink" guard below); absolute paths (e.g. a file dragged in from
+ * outside the workspace) are allowed as-is but only if they exist — the
+ * user already pointed at a concrete file on disk, so there's no traversal
+ * risk to guard against.
+ */
+function resolveAttachmentPath(relPath) {
+  if (!relPath) return null;
+  if (path.isAbsolute(relPath)) return fs.existsSync(relPath) ? relPath : null;
+  const root = workspaceRoot();
+  if (!root) return null;
+  const abs = path.resolve(root, relPath);
+  const rootWithSep = root.endsWith(path.sep) ? root : root + path.sep;
+  if (abs !== root && !abs.startsWith(rootWithSep)) return null;
+  return fs.existsSync(abs) ? abs : null;
+}
+
+/** Build a `<file>` prompt block for one attachment chip; null if unreadable. */
+function buildFileBlock(att) {
+  const abs = resolveAttachmentPath(att.path);
+  if (!abs) return null;
+  try {
+    let lines = fs.readFileSync(abs, "utf8").split("\n");
+    let rangeAttr = "";
+    if (att.startLine != null && att.endLine != null) {
+      const start = Math.max(1, att.startLine);
+      const end = Math.min(lines.length, att.endLine);
+      lines = lines.slice(start - 1, end);
+      rangeAttr = ` lines="${start}-${end}"`;
+    } else if (lines.length > MAX_ATTACH_LINES) {
+      lines = lines.slice(0, MAX_ATTACH_LINES);
+      lines.push(`… (truncated at ${MAX_ATTACH_LINES} lines)`);
+    }
+    let body = lines.join("\n");
+    if (body.length > MAX_ATTACH_CHARS) body = body.slice(0, MAX_ATTACH_CHARS) + "\n… (truncated)";
+    return `<file path="${att.path}"${rangeAttr}>\n${body}\n</file>`;
+  } catch {
+    return null;
+  }
+}
+
+/** Simple ordered-subsequence fuzzy match; lower score = tighter match. -1 = no match. */
+function fuzzyScore(q, target) {
+  if (!q) return 0;
+  let ti = 0, first = -1, last = -1;
+  for (const c of q) {
+    const idx = target.indexOf(c, ti);
+    if (idx === -1) return -1;
+    if (first === -1) first = idx;
+    last = idx;
+    ti = idx + 1;
+  }
+  return last - first + 1;
+}
+
+/** Workspace file search for the @-mention popup: fuzzy-filtered, capped, node_modules/.git excluded. */
+async function searchWorkspaceFiles(q) {
+  const query = String(q ?? "").toLowerCase();
+  try {
+    const uris = await vscode.workspace.findFiles(
+      "**/*",
+      "**/{node_modules,.git,.venv,venv,__pycache__,dist,build,out,.next,target,.pytest_cache}/**",
+      500,
+    );
+    const scored = [];
+    for (const u of uris) {
+      const rel = toWorkspaceRelative(u.fsPath);
+      const score = fuzzyScore(query, rel.toLowerCase());
+      if (score !== -1) scored.push({ rel, score });
+    }
+    scored.sort((a, b) => a.score - b.score || a.rel.length - b.rel.length);
+    return scored.slice(0, 20).map((s) => s.rel);
+  } catch {
+    return [];
+  }
+}
+
 // ---------- webview view ----------
 // transcript events that get replayed when the webview is rebuilt
 const REPLAYABLE = new Set(["user", "chunk", "thought", "tool", "toolUpdate", "system", "modeChanged", "turnEnd"]);
@@ -423,23 +518,42 @@ class AgentViewProvider {
   /**
    * Send a prompt as a brand-new turn (used by both the composer's "send"
    * and the retry button — retry is just this replayed with the recovered
-   * original prompt text).
+   * original prompt text). `attachments` are the composer's file chips
+   * (drag-drop / @-mention / attach-current-file) — deliberately kept OUT
+   * of the displayed/persisted "user" text (which stays exactly what the
+   * user typed) and instead expanded into `<file>` blocks that are
+   * prepended only to the text actually sent to the runtime. This is a
+   * pure text-assembly step — no protocol/runtime changes.
    */
-  async sendPrompt(text) {
+  async sendPrompt(text, attachments = []) {
     if (!(await this.ensureAgent())) return;
-    this.post({ type: "user", text });
-    if (!this.chatTitle) this.chatTitle = text.slice(0, 48);
+    const displayText = text || (attachments.length ? attachments.map((a) => `@${a.path}`).join(" ") : "");
+    if (!displayText) return;
+    this.post({ type: "user", text: displayText });
+    if (!this.chatTitle) this.chatTitle = displayText.slice(0, 48);
     this.post({ type: "turnStart" });
+    const blocks = attachments.map(buildFileBlock).filter(Boolean);
+    const promptText = blocks.length ? `${blocks.join("\n\n")}\n\n${displayText}` : displayText;
     try {
       const res = await this.acp.request("session/prompt", {
         sessionId: this.sessionId,
-        prompt: [{ type: "text", text }],
+        prompt: [{ type: "text", text: promptText }],
       });
       this.post({ type: "turnEnd", stopReason: res.stopReason });
     } catch (err) {
       this.post({ type: "system", text: `error: ${err.message}` });
       this.post({ type: "turnEnd", stopReason: "error" });
     }
+  }
+
+  /** Build an attachment chip from an editor's current selection (or whole file if no selection). */
+  attachmentFromEditor(editor) {
+    const rel = toWorkspaceRelative(editor.document.uri.fsPath);
+    const sel = editor.selection;
+    if (sel && !sel.isEmpty) {
+      return { path: rel, startLine: sel.start.line + 1, endLine: sel.end.line + 1 };
+    }
+    return { path: rel };
   }
 
   /**
@@ -495,7 +609,7 @@ class AgentViewProvider {
   async onWebviewMessage(m) {
     switch (m.type) {
       case "send":
-        await this.sendPrompt(m.text);
+        await this.sendPrompt(m.text, m.attachments);
         break;
       case "permissionChoice": {
         const w = this.permissionWaiters.get(m.id);
@@ -636,6 +750,41 @@ class AgentViewProvider {
         }
         break;
       }
+      case "searchFiles": {
+        // @-mention popup: fuzzy-filtered workspace file list, tagged with
+        // the panel's request seq so a slow response for an earlier
+        // keystroke can't clobber the results of a newer one.
+        const files = await searchWorkspaceFiles(m.q);
+        this.view?.webview.postMessage({ type: "fileResults", seq: m.seq, files });
+        break;
+      }
+      case "attachActiveFile": {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+          this.view?.webview.postMessage({ type: "system", text: "No file is open to attach." });
+          break;
+        }
+        this.view?.webview.postMessage({ type: "addAttachment", attachment: this.attachmentFromEditor(editor) });
+        break;
+      }
+      case "resolveDroppedUri": {
+        // Explorer/editor-tab drags land here as text/uri-list; see the
+        // drop handler in panel.js for what the webview sandbox actually
+        // exposes on dataTransfer.
+        try {
+          const uri = vscode.Uri.parse(m.uri);
+          if (uri.scheme !== "file") break;
+          const stat = await vscode.workspace.fs.stat(uri);
+          if (stat.type === vscode.FileType.Directory) {
+            this.view?.webview.postMessage({ type: "system", text: "Folders can't be attached yet — drop individual files." });
+            break;
+          }
+          this.view?.webview.postMessage({ type: "addAttachment", attachment: { path: toWorkspaceRelative(uri.fsPath) } });
+        } catch (err) {
+          this.log.appendLine(`drop resolve failed: ${err.message}`);
+        }
+        break;
+      }
       case "boot": {
         // Do NOT spawn the agent runtime just because the panel loaded —
         // that used to call ensureAgent() unconditionally on every webview
@@ -722,9 +871,14 @@ ${hasMd ? `<link rel="stylesheet" href="${mdcss}">` : ""}
   <div id="composer">
     <div id="planBar" hidden></div>
     <div id="permissionBar" hidden></div>
-    <textarea id="input" rows="3" placeholder="Describe a task. Review mode plans first; Approve executes with your OK."></textarea>
+    <div id="attachRow" hidden></div>
+    <div class="input-wrap">
+      <div id="mentionPopup" class="mention-popup" hidden></div>
+      <textarea id="input" rows="3" placeholder="Describe a task. Type @ to reference a file. Review mode plans first; Approve executes with your OK."></textarea>
+    </div>
     <div id="toolbar">
       <select id="model" title="Model"></select>
+      <button id="attachBtn" class="ghost" title="Attach current file or selection">&#128206;</button>
       <div class="spacer"></div>
       <button id="settings" class="ghost" title="Configure providers">&#8942;</button>
       <button id="stop" class="ghost" hidden>Stop</button>
@@ -785,6 +939,13 @@ async function activate(context) {
       if (!fs.existsSync(file)) fs.writeFileSync(file, PROVIDERS_TEMPLATE);
       const doc = await vscode.workspace.openTextDocument(file);
       vscode.window.showTextDocument(doc);
+    }),
+    vscode.commands.registerCommand("koder.addSelectionToChat", async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) return;
+      const attachment = provider.attachmentFromEditor(editor);
+      await vscode.commands.executeCommand("koder.chatView.focus");
+      provider.view?.webview.postMessage({ type: "addAttachment", attachment });
     }),
     vscode.commands.registerCommand("koder.openFeedbackLog", async () => {
       // Opens this month's local feedback JSONL — the "give you the log

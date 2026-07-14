@@ -9,6 +9,10 @@ const modelEl = document.getElementById("model");
 const settingsBtn = document.getElementById("settings");
 const permissionBar = document.getElementById("permissionBar");
 const modesEl = document.getElementById("modes");
+const composerEl = document.getElementById("composer");
+const attachRow = document.getElementById("attachRow");
+const attachBtn = document.getElementById("attachBtn");
+const mentionPopup = document.getElementById("mentionPopup");
 
 let streamEl = null;
 let streamRaw = "";
@@ -166,13 +170,192 @@ modesEl.addEventListener("click", (e) => {
   vscode.postMessage({ type: "setMode", mode: b.dataset.mode });
 });
 
+// ---------- attachments (chips): drag-drop, @-mention, attach-current-file ----------
+// Chips are pure UI state here — the extension does the actual file read +
+// prompt-block expansion (this side has no fs access, and keeping the
+// displayed/persisted "user" text free of file dumps is deliberate; see
+// extension.js sendPrompt).
+let attachments = []; // {path, startLine?, endLine?}
+
+function attachmentKey(a) {
+  return `${a.path}:${a.startLine ?? ""}-${a.endLine ?? ""}`;
+}
+
+function addAttachment(att) {
+  if (!att || !att.path) return;
+  const key = attachmentKey(att);
+  if (attachments.some((a) => attachmentKey(a) === key)) return; // dedupe
+  attachments.push(att);
+  renderAttachments();
+}
+
+function removeAttachment(idx) {
+  attachments.splice(idx, 1);
+  renderAttachments();
+}
+
+function clearAttachments() {
+  attachments = [];
+  renderAttachments();
+}
+
+function renderAttachments() {
+  attachRow.innerHTML = "";
+  attachRow.hidden = attachments.length === 0;
+  attachments.forEach((a, i) => {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    const base = a.path.split("/").pop();
+    const label = a.startLine ? `${base}:${a.startLine}-${a.endLine}` : base;
+    chip.innerHTML = `<span class="chip-label"></span><button class="chip-x" title="Remove" aria-label="Remove ${base}">&#10005;</button>`;
+    const labelEl = chip.querySelector(".chip-label");
+    labelEl.textContent = label;
+    labelEl.title = a.path;
+    chip.querySelector(".chip-x").addEventListener("click", () => removeAttachment(i));
+    attachRow.appendChild(chip);
+  });
+}
+
+attachBtn.addEventListener("click", () => vscode.postMessage({ type: "attachActiveFile" }));
+
+// drag-and-drop onto the composer. VS Code reliably surfaces explorer/tab
+// drags into a webview as `text/uri-list`; OS-level Finder/Explorer drops
+// vary by platform and sometimes populate `dataTransfer.files` instead (a
+// webview's sandbox often strips real filesystem paths off File objects,
+// so uri-list is the general-purpose path — this is a known webview
+// sandbox limitation, not a bug here).
+["dragenter", "dragover"].forEach((evt) =>
+  composerEl.addEventListener(evt, (e) => {
+    if (!e.dataTransfer) return;
+    e.preventDefault();
+    composerEl.classList.add("drag-over");
+  }),
+);
+["dragleave", "drop"].forEach((evt) =>
+  composerEl.addEventListener(evt, () => composerEl.classList.remove("drag-over")),
+);
+composerEl.addEventListener("drop", (e) => {
+  e.preventDefault();
+  const dt = e.dataTransfer;
+  if (!dt) return;
+  const uriList = dt.getData("text/uri-list") || dt.getData("text/plain");
+  if (uriList) {
+    for (const line of uriList.split(/\r?\n/)) {
+      const s = line.trim();
+      if (!s || s.startsWith("#")) continue;
+      vscode.postMessage({ type: "resolveDroppedUri", uri: s });
+    }
+    return;
+  }
+  for (const f of dt.files ?? []) {
+    if (f.path) vscode.postMessage({ type: "resolveDroppedUri", uri: "file://" + f.path });
+  }
+});
+
+// ---------- @-mention autocomplete ----------
+let mentionActive = false;
+let mentionStart = -1; // index of "@" in inputEl.value
+let mentionQuery = "";
+let mentionItems = [];
+let mentionIndex = 0;
+let mentionSeq = 0;
+
+function closeMention() {
+  mentionActive = false;
+  mentionPopup.hidden = true;
+  mentionPopup.innerHTML = "";
+}
+
+function openMentionAt(atIdx) {
+  mentionActive = true;
+  mentionStart = atIdx;
+  mentionQuery = "";
+  requestMentionResults();
+}
+
+function requestMentionResults() {
+  vscode.postMessage({ type: "searchFiles", q: mentionQuery, seq: ++mentionSeq });
+}
+
+function renderMentionResults(files) {
+  mentionItems = files;
+  mentionIndex = 0;
+  if (!files.length) {
+    mentionPopup.innerHTML = `<div class="mention-empty">No matching files</div>`;
+    mentionPopup.hidden = false;
+    return;
+  }
+  mentionPopup.innerHTML = files.map((_, i) => `<div class="mention-item${i === 0 ? " active" : ""}"></div>`).join("");
+  [...mentionPopup.querySelectorAll(".mention-item")].forEach((el, i) => {
+    el.textContent = files[i];
+    el.addEventListener("mousedown", (e) => { e.preventDefault(); pickMention(i); });
+  });
+  mentionPopup.hidden = false;
+}
+
+function pickMention(i) {
+  const f = mentionItems[i];
+  if (f === undefined) return;
+  const before = inputEl.value.slice(0, mentionStart);
+  const after = inputEl.value.slice(mentionStart + 1 + mentionQuery.length);
+  const token = `@${f} `;
+  inputEl.value = before + token + after;
+  const caret = (before + token).length;
+  inputEl.focus();
+  inputEl.setSelectionRange(caret, caret);
+  addAttachment({ path: f });
+  closeMention();
+}
+
+function updateMentionHighlight() {
+  [...mentionPopup.querySelectorAll(".mention-item")].forEach((el, i) => el.classList.toggle("active", i === mentionIndex));
+  mentionPopup.querySelector(".mention-item.active")?.scrollIntoView({ block: "nearest" });
+}
+
+inputEl.addEventListener("input", () => {
+  const caret = inputEl.selectionStart;
+  if (!mentionActive) {
+    const prevChar = inputEl.value[caret - 2];
+    if (inputEl.value[caret - 1] === "@" && (prevChar === undefined || /\s/.test(prevChar))) {
+      openMentionAt(caret - 1);
+    }
+    return;
+  }
+  const slice = inputEl.value.slice(mentionStart + 1, caret);
+  if (caret <= mentionStart || /\s/.test(slice)) { closeMention(); return; }
+  mentionQuery = slice;
+  requestMentionResults();
+});
+
+// Registered on document (capture phase) so it runs BEFORE inputEl's own
+// keydown listener below (same-element listeners fire in registration
+// order regardless of capture flag — only a capturing ancestor listener
+// can pre-empt a target's own listener).
+document.addEventListener(
+  "keydown",
+  (e) => {
+    if (e.target !== inputEl || !mentionActive) return;
+    if (e.key === "ArrowDown") { e.preventDefault(); e.stopPropagation(); mentionIndex = Math.min(mentionIndex + 1, mentionItems.length - 1); updateMentionHighlight(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); e.stopPropagation(); mentionIndex = Math.max(mentionIndex - 1, 0); updateMentionHighlight(); }
+    else if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); pickMention(mentionIndex); }
+    else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeMention(); }
+  },
+  true,
+);
+document.addEventListener("click", (e) => {
+  if (mentionActive && !mentionPopup.contains(e.target) && e.target !== inputEl) closeMention();
+});
+
 // ---------- send ----------
 function send() {
   const text = inputEl.value.trim();
-  if (!text || busy) return;
+  if (busy || (!text && attachments.length === 0)) return;
   inputEl.value = "";
   planBar.hidden = true; // typing a custom reply supersedes the plan buttons
-  vscode.postMessage({ type: "send", text }); // extension echoes back "user" for transcript
+  closeMention();
+  const atts = attachments.slice();
+  clearAttachments();
+  vscode.postMessage({ type: "send", text, attachments: atts }); // extension echoes back "user" for transcript
 }
 sendBtn.addEventListener("click", send);
 stopBtn.addEventListener("click", () => vscode.postMessage({ type: "cancel" }));
@@ -504,6 +687,8 @@ window.addEventListener("message", (e) => {
       bulkRaw = null;
       turnHasText = false;
       lastAgentEl = null;
+      clearAttachments();
+      closeMention();
       for (const ev of m.events) applyEvent(ev, true);
       flushBulk();
       if (m.events.length === 0) showEmpty();
@@ -568,6 +753,10 @@ window.addEventListener("message", (e) => {
     case "historyList": showHistory(m.chats); break;
     case "planReady": showPlanBar(m.path); break;
     case "system": addMsg("system", m.text); break;
+    case "addAttachment": addAttachment(m.attachment); break;
+    case "fileResults":
+      if (mentionActive && m.seq === mentionSeq) renderMentionResults(m.files);
+      break;
     case "clear":
       messagesEl.innerHTML = "";
       tools.clear();
@@ -577,6 +766,8 @@ window.addEventListener("message", (e) => {
       showEmpty();
       turnHasText = false;
       lastAgentEl = null;
+      clearAttachments();
+      closeMention();
       break;
   }
 });
