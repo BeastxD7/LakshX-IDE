@@ -210,6 +210,47 @@
   border-radius: var(--koder-radius-s);
 }
 
+/* ---------- de-VSCode polish round 2 ---------- */
+/* activity bar icons: gentle lift on hover */
+.monaco-workbench .activitybar .action-item .action-label {
+  transition: background-color 0.14s var(--koder-ease), transform 0.14s var(--koder-ease);
+}
+.monaco-workbench .activitybar .action-item:hover .action-label {
+  transform: translateY(-1px);
+}
+.monaco-workbench .activitybar .action-item.checked .action-label {
+  transform: none;
+}
+
+/* sidebar section headers: quiet, tracked-out labels */
+.monaco-workbench .pane-header h3.title {
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.09em;
+  opacity: 0.75;
+}
+
+/* status bar: smaller, calmer */
+.monaco-workbench .part.statusbar {
+  font-size: 11px;
+}
+
+/* editor tabs bar breathing room */
+.monaco-workbench .tabs-and-actions-container {
+  padding-left: 4px;
+}
+
+/* panel/aux-bar composite title alignment with the new look */
+.monaco-workbench .part.auxiliarybar .composite.title,
+.monaco-workbench .part.sidebar .composite.title {
+  border-bottom: 1px solid var(--koder-hairline);
+}
+
+/* welcome-less empty editor: dim the letterpress fully */
+.monaco-workbench .editor-group-container.empty .editor-group-letterpress {
+  opacity: 0.12;
+}
+
 /* ---------- reduce motion: kill all Koder animations ---------- */
 @media (prefers-reduced-motion: reduce) {
   .monaco-workbench *,

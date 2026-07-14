@@ -10,7 +10,7 @@
   "activationEvents": [],
   "contributes": {
     "viewsContainers": {
-      "activitybar": [
+      "secondarySidebar": [
         {
           "id": "koder",
           "title": "Koder",
@@ -29,12 +29,20 @@
       ]
     },
     "commands": [
+      { "command": "koder.openAgent", "title": "Koder: Open Agent", "icon": "media/koder.svg" },
       { "command": "koder.newChat", "title": "Koder: New Chat", "icon": "$(add)" },
-      { "command": "koder.openProviderSettings", "title": "Koder: Configure AI Providers (BYOK)" }
+      { "command": "koder.openProviderSettings", "title": "Koder: Configure AI Providers (BYOK)", "icon": "$(gear)" }
+    ],
+    "keybindings": [
+      { "command": "koder.openAgent", "key": "ctrl+l", "mac": "cmd+l" }
     ],
     "menus": {
       "view/title": [
-        { "command": "koder.newChat", "when": "view == koder.agentView", "group": "navigation" }
+        { "command": "koder.newChat", "when": "view == koder.agentView", "group": "navigation@1" },
+        { "command": "koder.openProviderSettings", "when": "view == koder.agentView", "group": "navigation@2" }
+      ],
+      "editor/title": [
+        { "command": "koder.openAgent", "group": "navigation@100" }
       ]
     },
     "configuration": {

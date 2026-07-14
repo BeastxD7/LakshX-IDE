@@ -113,6 +113,51 @@ function send() {
   vscode.postMessage({ type: "send", text });
 }
 
+// ---------- BYOK settings panel ----------
+const settingsPanel = document.getElementById("settingsPanel");
+const settingsBody = document.getElementById("settingsBody");
+const PROVIDER_LABELS = {
+  anthropic: "Anthropic (Claude)",
+  openai: "OpenAI",
+  openrouter: "OpenRouter — 400+ models",
+  gemini: "Google Gemini",
+  deepseek: "DeepSeek",
+  groq: "Groq",
+  xai: "xAI (Grok)",
+};
+
+function showSettings(state) {
+  settingsBody.innerHTML = "";
+  const dm = document.createElement("div");
+  dm.className = "field";
+  dm.innerHTML = `<label>Default model <span class="muted">provider/model</span></label>
+    <input id="defaultModel" placeholder="anthropic/claude-sonnet-5">`;
+  dm.querySelector("input").value = state.defaultModel || "";
+  settingsBody.appendChild(dm);
+
+  for (const [id, label] of Object.entries(PROVIDER_LABELS)) {
+    const f = document.createElement("div");
+    f.className = "field";
+    const isSet = state.set?.[id];
+    f.innerHTML = `<label>${label} ${isSet ? '<span class="pill">key saved</span>' : ""}</label>
+      <input type="password" data-provider="${id}" placeholder="${isSet ? "•••••••• (leave blank to keep)" : "API key"}">`;
+    settingsBody.appendChild(f);
+  }
+  settingsPanel.hidden = false;
+}
+
+document.getElementById("settingsClose").addEventListener("click", () => (settingsPanel.hidden = true));
+document.getElementById("settingsFile").addEventListener("click", () => vscode.postMessage({ type: "openSettingsFile" }));
+document.getElementById("settingsSave").addEventListener("click", () => {
+  const keys = {};
+  for (const input of settingsBody.querySelectorAll("input[data-provider]")) {
+    if (input.value.trim()) keys[input.dataset.provider] = input.value.trim();
+  }
+  const defaultModel = document.getElementById("defaultModel").value.trim();
+  vscode.postMessage({ type: "saveProviders", keys, defaultModel });
+  settingsPanel.hidden = true;
+});
+
 sendBtn.addEventListener("click", send);
 stopBtn.addEventListener("click", () => vscode.postMessage({ type: "cancel" }));
 settingsBtn.addEventListener("click", () => vscode.postMessage({ type: "openSettings" }));
@@ -193,6 +238,9 @@ window.addEventListener("message", (e) => {
       endStream();
       setBusy(false);
       permissionBar.hidden = true;
+      break;
+    case "showSettings":
+      showSettings(m.providers);
       break;
     case "system":
       addMsg("system", m.text);

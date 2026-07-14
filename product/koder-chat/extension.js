@@ -96,6 +96,43 @@ const PROVIDERS_TEMPLATE = `{
 }
 `;
 
+// ---------- BYOK provider state (~/.koder/providers.json) ----------
+const PROVIDER_IDS = ["anthropic", "openai", "openrouter", "gemini", "deepseek", "groq", "xai"];
+
+function providersFile() {
+  return path.join(os.homedir(), ".koder", "providers.json");
+}
+
+function readProvidersJson() {
+  try {
+    return JSON.parse(fs.readFileSync(providersFile(), "utf8"));
+  } catch {
+    return { defaultModel: "anthropic/claude-sonnet-5", providers: {} };
+  }
+}
+
+/** For the settings UI: which providers have keys (never send the keys). */
+function readProviderState() {
+  const cfg = readProvidersJson();
+  const state = { defaultModel: cfg.defaultModel ?? "anthropic/claude-sonnet-5", set: {} };
+  for (const id of PROVIDER_IDS) {
+    state.set[id] = Boolean(cfg.providers?.[id]?.apiKey);
+  }
+  return state;
+}
+
+function saveProviderState(keys, defaultModel) {
+  const cfg = readProvidersJson();
+  cfg.providers = cfg.providers ?? {};
+  for (const [id, key] of Object.entries(keys)) {
+    if (!key) continue; // empty input = leave existing key untouched
+    cfg.providers[id] = { ...(cfg.providers[id] ?? {}), apiKey: key.trim() };
+  }
+  if (defaultModel) cfg.defaultModel = defaultModel.trim();
+  fs.mkdirSync(path.dirname(providersFile()), { recursive: true });
+  fs.writeFileSync(providersFile(), JSON.stringify(cfg, null, 2));
+}
+
 // ---------- webview view ----------
 class AgentViewProvider {
   constructor(context) {
@@ -212,6 +249,21 @@ class AgentViewProvider {
         this.newChat();
         break;
       case "openSettings":
+        this.post({ type: "showSettings", providers: readProviderState() });
+        break;
+      case "saveProviders": {
+        saveProviderState(m.keys, m.defaultModel);
+        this.post({ type: "system", text: "Provider settings saved." });
+        // refresh model list with the new keys
+        if (this.acp) {
+          const models = await this.acp.request("koder/models", {});
+          this.post({ type: "ready", models });
+        } else {
+          await this.ensureAgent();
+        }
+        break;
+      }
+      case "openSettingsFile":
         vscode.commands.executeCommand("koder.openProviderSettings");
         break;
       case "boot":
@@ -239,6 +291,18 @@ class AgentViewProvider {
 <link rel="stylesheet" href="${css}">
 </head><body>
 <div id="app">
+  <div id="settingsPanel" hidden>
+    <div class="settings-head">
+      <span>AI Providers · BYOK</span>
+      <button id="settingsClose" class="ghost">✕</button>
+    </div>
+    <div class="settings-body" id="settingsBody"></div>
+    <div class="settings-foot">
+      <button id="settingsFile" class="ghost">Edit JSON</button>
+      <div class="spacer"></div>
+      <button id="settingsSave">Save keys</button>
+    </div>
+  </div>
   <div id="messages"></div>
   <div id="composer">
     <div id="permissionBar" hidden></div>
@@ -259,10 +323,21 @@ class AgentViewProvider {
 
 function activate(context) {
   const provider = new AgentViewProvider(context);
+
+  const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 1000);
+  statusItem.text = "✦ Koder";
+  statusItem.tooltip = "Open Koder Agent (⌘L)";
+  statusItem.command = "koder.openAgent";
+  statusItem.show();
+
   context.subscriptions.push(
+    statusItem,
     vscode.window.registerWebviewViewProvider("koder.agentView", provider, {
       webviewOptions: { retainContextWhenHidden: true },
     }),
+    vscode.commands.registerCommand("koder.openAgent", () =>
+      vscode.commands.executeCommand("koder.agentView.focus"),
+    ),
     vscode.commands.registerCommand("koder.newChat", () => provider.newChat()),
     vscode.commands.registerCommand("koder.openProviderSettings", async () => {
       const dir = path.join(os.homedir(), ".koder");
