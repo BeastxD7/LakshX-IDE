@@ -1,0 +1,9 @@
+# Upstream code-oss source — fetched at build time, never committed (thin-fork discipline)
+/upstream/
+
+node_modules/
+dist/
+out/
+*.log
+.DS_Store
+.env
