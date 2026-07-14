@@ -59,4 +59,18 @@ for (const rel of htmlFiles) {
   console.log(`css injected → ${rel}`);
 }
 
+// 3. build-system tweak: Koder ships no copilot extension — the packaging
+// pipeline's ripgrep-shim step must skip instead of throwing.
+const copilotBuild = join(upstream, "build", "lib", "copilot.ts");
+if (existsSync(copilotBuild)) {
+  let src = readFileSync(copilotBuild, "utf8");
+  const throwLine = "throw new Error(`[prepareBuiltInCopilotRipgrepShim] Copilot SDK directory not found at ${copilotSdkBase}`);";
+  const skipLine = "console.log(`[koder] copilot extension not bundled — skipping ripgrep shim`); return;";
+  if (src.includes(throwLine)) {
+    src = src.replace(throwLine, skipLine);
+    writeFileSync(copilotBuild, src);
+    console.log("patched build/lib/copilot.ts (shim skips when copilot absent)");
+  }
+}
+
 console.log("Koder UI applied.");
