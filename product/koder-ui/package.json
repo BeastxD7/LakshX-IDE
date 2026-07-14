@@ -36,7 +36,10 @@
       "editor.renderLineHighlight": "none",
       "editor.guides.indentation": false,
       "terminal.integrated.smoothScrolling": true,
-      "window.commandCenter": true
+      "window.commandCenter": true,
+      "chat.disableAIFeatures": true,
+      "chat.commandCenter.enabled": false,
+      "chat.agent.enabled": false
     }
   }
 }

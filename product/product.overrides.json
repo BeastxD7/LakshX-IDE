@@ -34,5 +34,28 @@
   "crashReporter": null,
   "appCenter": null,
   "enableTelemetry": false,
-  "aiConfig": null
+  "aiConfig": null,
+  "defaultChatAgent": {
+    "name": "Koder",
+    "providerName": "Koder",
+    "extensionId": "koder.koder-chat",
+    "chatExtensionId": "koder.koder-chat",
+    "providerExtensionId": "koder.koder-chat",
+    "completionsAdvancedSetting": "koder.agent",
+    "providerUriSetting": "koder.agent.providerUri",
+    "provider": {
+      "default": { "id": "koder", "name": "Koder" },
+      "enterprise": { "id": "koder", "name": "Koder" }
+    }
+  },
+  "chatParticipantRegistry": null,
+  "chatSessionRecommendations": null,
+  "agentSdks": null,
+  "aiGeneratedWorkspaceTrust": null,
+  "gitHubEntitlement": null,
+  "documentationUrl": null,
+  "introductoryVideosUrl": null,
+  "tipsAndTricksUrl": null,
+  "twitterUrl": null,
+  "requestFeatureUrl": null
 }

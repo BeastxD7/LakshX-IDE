@@ -6,7 +6,7 @@
  *     (src/ so future compiles keep it, out/ so it's live without a rebuild)
  * Idempotent: re-running replaces the previous injection between markers.
  */
-import { cpSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -18,14 +18,18 @@ if (!existsSync(join(upstream, "package.json"))) {
   process.exit(1);
 }
 
-// 1. built-in extension
-const extSrc = join(root, "product", "koder-ui");
-const extDst = join(upstream, "extensions", "koder-ui");
-cpSync(extSrc, extDst, { recursive: true });
-console.log("koder-ui extension → extensions/koder-ui");
+// 1. built-in extensions
+for (const ext of ["koder-ui", "koder-chat"]) {
+  cpSync(join(root, "product", ext), join(upstream, "extensions", ext), { recursive: true });
+  console.log(`${ext} extension → extensions/${ext}`);
+}
+
+// 1b. de-VSCode: the bundled Copilot chat extension must not exist in Koder
+rmSync(join(upstream, "extensions", "copilot"), { recursive: true, force: true });
+console.log("removed extensions/copilot");
 
 // 2. CSS injection
-const css = readFileSync(join(extSrc, "koder.css"), "utf8");
+const css = readFileSync(join(root, "product", "koder-ui", "koder.css"), "utf8");
 const OPEN = "<!-- KODER-UI-BEGIN -->";
 const CLOSE = "<!-- KODER-UI-END -->";
 const block = `${OPEN}<style id="koder-ui">\n${css}\n</style>${CLOSE}`;

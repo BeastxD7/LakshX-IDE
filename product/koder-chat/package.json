@@ -1,0 +1,51 @@
+{
+  "name": "koder-chat",
+  "displayName": "Koder Agent",
+  "description": "Koder's agent panel — talks to the Koder Agent Runtime over ACP.",
+  "version": "0.0.1",
+  "publisher": "koder",
+  "license": "MIT",
+  "engines": { "vscode": "^1.128.0" },
+  "main": "./extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "koder",
+          "title": "Koder",
+          "icon": "media/koder.svg"
+        }
+      ]
+    },
+    "views": {
+      "koder": [
+        {
+          "type": "webview",
+          "id": "koder.agentView",
+          "name": "Agent",
+          "icon": "media/koder.svg"
+        }
+      ]
+    },
+    "commands": [
+      { "command": "koder.newChat", "title": "Koder: New Chat", "icon": "$(add)" },
+      { "command": "koder.openProviderSettings", "title": "Koder: Configure AI Providers (BYOK)" }
+    ],
+    "menus": {
+      "view/title": [
+        { "command": "koder.newChat", "when": "view == koder.agentView", "group": "navigation" }
+      ]
+    },
+    "configuration": {
+      "title": "Koder Agent",
+      "properties": {
+        "koder.agent.command": {
+          "type": "string",
+          "default": "",
+          "description": "Command to launch the Koder Agent Runtime (ACP over stdio). Empty = auto-detect the bundled runtime."
+        }
+      }
+    }
+  }
+}
