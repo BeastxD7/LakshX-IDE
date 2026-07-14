@@ -1,10 +1,15 @@
-// Koder Remote Access — mobile-optimized single page, view-only.
+// Koder Remote Access — mobile-optimized single page, view + control
+// (docs/research/10-remote-control.md, Phase B).
 // Served as a plain string by remote-server.js (no separate static files,
 // same "one self-contained response" discipline as extension.js's own
 // html() method for the desktop webview). Renders the same event vocabulary
 // panel.js already understands (chunk/thought/tool/toolUpdate/system/
-// modeChanged) plus a read-only permission banner — no composer, no
-// settings, no history: this is a phone-sized remote, not a mobile IDE.
+// modeChanged), plus a composer (text input + send) and tappable
+// Allow/Deny pills on a `permission` event — a phone-sized remote, not a
+// full mobile IDE, but no longer read-only. Both POST to remote-server.js's
+// `/control/send` and `/control/permission` routes, which forward straight
+// into extension.js's `AgentViewProvider.onWebviewMessage` — the same
+// dispatch the desktop composer/permission bar already drive.
 //
 // Built as string concatenation (not a template literal) deliberately: the
 // embedded <script> needs to contain its own JS string/regex literals
@@ -64,8 +69,12 @@ var CSS = [
   "  padding: 12px 14px; font-size: 13px; }",
   ".permbar .ptitle { font-family: var(--mono); font-size: 12px; margin-bottom: 8px; color: var(--fg); }",
   ".permbar .pills { display: flex; gap: 8px; flex-wrap: wrap; }",
-  ".permbar .pill { border-radius: 99px; padding: 5px 14px; font-size: 12px; background: rgba(255,255,255,0.08);",
-  "  color: var(--muted); border: 1px solid var(--hairline); }",
+  ".permbar .pill { border-radius: 99px; padding: 7px 16px; font-size: 12.5px; background: rgba(255,255,255,0.08);",
+  "  color: var(--fg); border: 1px solid var(--hairline); font-family: inherit; }",
+  ".permbar .pill.allow { background: rgba(78,216,162,0.16); border-color: rgba(78,216,162,0.4); color: #7be0b8; }",
+  ".permbar .pill.deny { background: rgba(255,107,129,0.14); border-color: rgba(255,107,129,0.36); color: #ff8fa0; }",
+  ".permbar .pill:active { opacity: 0.6; }",
+  ".permbar .pill:disabled { opacity: 0.4; }",
   ".permbar .caption { margin-top: 8px; color: var(--faint); font-size: 11.5px; }",
   ".empty { margin: auto; text-align: center; color: var(--muted); padding: 40px 24px; }",
   ".empty .title { font-weight: 600; font-size: 15px; color: var(--fg); margin-bottom: 6px; }",
@@ -74,6 +83,18 @@ var CSS = [
   "#reconnectScreen.show { display: block; }",
   "#reconnectScreen .title { color: var(--fg); font-weight: 600; margin-bottom: 8px; font-size: 15px; }",
   "#reconnectScreen .hint { font-size: 12.5px; line-height: 1.6; }",
+  "#composer { display: flex; align-items: flex-end; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--hairline);",
+  "  position: sticky; bottom: 0; background: var(--bg); }",
+  "#composerInput { flex: 1; resize: none; min-height: 20px; max-height: 120px; background: rgba(255,255,255,0.06);",
+  "  border: 1px solid var(--hairline); border-radius: 10px; color: var(--fg); font: inherit; font-size: 14.5px;",
+  "  padding: 9px 12px; line-height: 1.4; }",
+  "#composerInput:disabled { opacity: 0.5; }",
+  "#composerInput::placeholder { color: var(--faint); }",
+  "#sendBtn { flex: none; background: var(--accent); color: #fff; border: none; border-radius: 10px; padding: 0 16px;",
+  "  height: 38px; font-size: 13.5px; font-weight: 600; }",
+  "#sendBtn:disabled { opacity: 0.4; }",
+  "#composerNote { text-align: center; color: var(--faint); font-size: 11px; padding: 0 12px 6px; display: none; }",
+  "#composerNote.show { display: block; }",
 ].join("\n");
 
 // Client-side script, built without template literals or literal backticks
@@ -98,9 +119,13 @@ var SCRIPT = [
   "  var modeBadgeEl = document.getElementById('modeBadge');",
   "  var bannerEl = document.getElementById('banner');",
   "  var reconnectEl = document.getElementById('reconnectScreen');",
+  "  var composerEl = document.getElementById('composer');",
+  "  var inputEl = document.getElementById('composerInput');",
+  "  var sendBtnEl = document.getElementById('sendBtn');",
+  "  var noteEl = document.getElementById('composerNote');",
   "",
   "  function showReconnect() {",
-  "    ['header', 'banner', 'messages'].forEach(function (id) {",
+  "    ['header', 'banner', 'messages', 'composer'].forEach(function (id) {",
   "      var el = document.getElementById(id);",
   "      if (el) el.style.display = 'none';",
   "    });",
@@ -111,6 +136,41 @@ var SCRIPT = [
   "",
   "  var streamEl = null, streamRaw = '';",
   "  var tools = {};",
+  "  var busy = false;",
+  "",
+  "  function note(text, ms) {",
+  "    noteEl.textContent = text;",
+  "    noteEl.className = 'show';",
+  "    if (ms) setTimeout(function () { noteEl.className = ''; }, ms);",
+  "  }",
+  "  function setBusy(b) {",
+  "    busy = b;",
+  "    inputEl.disabled = b;",
+  "    sendBtnEl.disabled = b;",
+  "    if (b) note('Agent is working…'); else noteEl.className = '';",
+  "  }",
+  "  function controlPost(path, body) {",
+  "    return fetch(path + '?token=' + encodeURIComponent(token), {",
+  "      method: 'POST',",
+  "      headers: { 'Content-Type': 'application/json' },",
+  "      body: JSON.stringify(body),",
+  "    });",
+  "  }",
+  "  function submitPrompt() {",
+  "    var text = inputEl.value.trim();",
+  "    if (!text || busy) return;",
+  "    inputEl.value = '';",
+  "    controlPost('/control/send', { text: text })",
+  "      .then(function (r) {",
+  "        if (r.status === 409) { inputEl.value = text; note('Agent is busy — try again in a moment.', 2500); return; }",
+  "        if (!r.ok) { inputEl.value = text; note('Could not send — check your connection.', 2500); }",
+  "      })",
+  "      .catch(function () { inputEl.value = text; note('Could not send — check your connection.', 2500); });",
+  "  }",
+  "  sendBtnEl.addEventListener('click', submitPrompt);",
+  "  inputEl.addEventListener('keydown', function (e) {",
+  "    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitPrompt(); }",
+  "  });",
   "",
   "  function escapeHtml(s) {",
   "    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');",
@@ -167,16 +227,34 @@ var SCRIPT = [
   "    tools[t.id] = el;",
   "    scrollBottom();",
   "  }",
+  "  function respondPermission(id, optionId, wrap) {",
+  "    wrap.querySelectorAll('.pill').forEach(function (p) { p.disabled = true; });",
+  "    wrap.querySelector('.caption').textContent = 'Sent — resolving…';",
+  "    controlPost('/control/permission', { id: id, optionId: optionId })",
+  "      .then(function (r) {",
+  "        if (!r.ok) { wrap.querySelector('.caption').textContent = 'Could not send — try again or use the IDE.'; ",
+  "          wrap.querySelectorAll('.pill').forEach(function (p) { p.disabled = false; }); }",
+  "      })",
+  "      .catch(function () {",
+  "        wrap.querySelector('.caption').textContent = 'Could not send — try again or use the IDE.';",
+  "        wrap.querySelectorAll('.pill').forEach(function (p) { p.disabled = false; });",
+  "      });",
+  "  }",
   "  function showPermission(m) {",
   "    var wrap = document.createElement('div');",
   "    wrap.className = 'permbar';",
   "    wrap.setAttribute('data-perm-id', String(m.id));",
-  "    var pillsHtml = (m.options || []).map(function (o) {",
-  "      return '<span class=\"pill\">' + escapeHtml(o.name) + '</span>';",
-  "    }).join('');",
-  "    wrap.innerHTML = '<div class=\"ptitle\"></div><div class=\"pills\">' + pillsHtml + '</div>' +",
-  "      '<div class=\"caption\">Waiting for you in the IDE — approve or deny there.</div>';",
+  "    wrap.innerHTML = '<div class=\"ptitle\"></div><div class=\"pills\"></div>' +",
+  "      '<div class=\"caption\">Approve or deny here, or from the IDE — whichever happens first wins.</div>';",
   "    wrap.querySelector('.ptitle').textContent = m.title;",
+  "    var pillsEl = wrap.querySelector('.pills');",
+  "    (m.options || []).forEach(function (o) {",
+  "      var b = document.createElement('button');",
+  "      b.className = 'pill ' + (String(o.kind || '').indexOf('allow') === 0 ? 'allow' : 'deny');",
+  "      b.textContent = o.name;",
+  "      b.addEventListener('click', function () { respondPermission(m.id, o.id, wrap); });",
+  "      pillsEl.appendChild(b);",
+  "    });",
   "    messagesEl.appendChild(wrap);",
   "    scrollBottom();",
   "  }",
@@ -200,9 +278,10 @@ var SCRIPT = [
   "        modeBadgeEl.textContent = m.mode;",
   "        if (m.auto) addMsg('system', 'Switched to ' + m.mode + ' mode.');",
   "        break;",
-  "      case 'turnStart': endStream(); break;",
-  "      case 'turnEnd': endStream(); break;",
+  "      case 'turnStart': endStream(); setBusy(true); break;",
+  "      case 'turnEnd': endStream(); setBusy(false); break;",
   "      case 'permission': showPermission(m); break;",
+  "      case 'permissionResolved': clearPermission(m.id); break;",
   "    }",
   "  }",
   "",
@@ -264,7 +343,7 @@ var SCRIPT = [
   "          if (m.type === 'clear') {",
   "            messagesEl.innerHTML = '<div class=\"empty\"><div class=\"title\">Chat cleared</div>' +",
   "              '<div class=\"hint\">A new chat was started in the IDE.</div></div>';",
-  "            tools = {}; endStream();",
+  "            tools = {}; endStream(); setBusy(false);",
   "            return;",
   "          }",
   "          if (m.type === 'replay') {",
@@ -309,6 +388,11 @@ function renderMobilePage() {
     '    <div class="title">Disconnected</div>\n' +
     '    <div class="hint">Remote Access was turned off in the IDE, or this link expired.<br>' +
     "Scan a new QR code from Koder to reconnect.</div>\n" +
+    "  </div>\n" +
+    '  <div id="composerNote"></div>\n' +
+    '  <div id="composer">\n' +
+    '    <textarea id="composerInput" rows="1" placeholder="Message Koder…"></textarea>\n' +
+    '    <button id="sendBtn">Send</button>\n' +
     "  </div>\n" +
     "</div>\n" +
     "<script>\n" + SCRIPT + "\n</script>\n" +

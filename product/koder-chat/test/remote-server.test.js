@@ -22,6 +22,25 @@ function fakeAdapter(overrides = {}) {
 }
 
 /**
+ * A fake adapter that also supports control actions, recording every call to
+ * `onControl` (the thing extension.js wires to `AgentViewProvider.onWebviewMessage`)
+ * so tests can assert the control routes reach the SAME dispatch a real desktop
+ * webview message would — no parallel/second resolution path.
+ */
+function controlAdapter({ busy = false } = {}) {
+  const calls = [];
+  return {
+    calls,
+    getSnapshot: () => ({ workspace: "test-workspace", mode: "review", transcript: [] }),
+    isBusy: () => busy,
+    onControl: (msg) => {
+      calls.push(msg);
+      return Promise.resolve();
+    },
+  };
+}
+
+/**
  * Raw HTTP GET so we can control the Host header independently of the
  * socket's real destination (DNS-rebinding-style test). The server binds
  * only to the LAN interface (not loopback) by design, so `connectIp` must be
@@ -48,6 +67,29 @@ function rawGet(connectIp, port, pathAndQuery, hostHeader) {
 /** The IP part of `server.host` ("<ip>:<port>") — the real address to connect to. */
 function ipOf(server) {
   return server.host.split(":")[0];
+}
+
+/** Raw HTTP POST with a JSON body, same Host-header-forging capability as rawGet. */
+function rawPost(connectIp, port, pathAndQuery, hostHeader, body) {
+  return new Promise((resolve, reject) => {
+    const payload = body === undefined ? "" : JSON.stringify(body);
+    const req = http.request(
+      {
+        host: connectIp,
+        port,
+        path: pathAndQuery,
+        method: "POST",
+        headers: { Host: hostHeader, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) },
+      },
+      (res) => {
+        let respBody = "";
+        res.on("data", (d) => (respBody += d));
+        res.on("end", () => resolve({ status: res.statusCode, body: respBody }));
+      },
+    );
+    req.on("error", reject);
+    req.end(payload);
+  });
 }
 
 test("off by default: a fresh RemoteServer is not running and has no port/token", () => {
@@ -207,5 +249,218 @@ test("port auto-increments on EADDRINUSE so two servers can run side by side", a
     }
   } finally {
     a.stop();
+  }
+});
+
+// ---------- Control-layer tests (docs/research/10 Phase B) ----------
+// These exercise the auth boundary for control actions *specifically*, not
+// just viewing (view-only auth is already covered above) — plus the actual
+// dispatch: a control POST must reach `adapter.onControl` with the same
+// message shape the desktop webview's postMessage already sends, since
+// extension.js wires `onControl` straight to `AgentViewProvider.onWebviewMessage`.
+
+test("POST /control/send without a valid token is rejected with 401 and never reaches onControl", async () => {
+  if (!lanAddress()) return;
+  const adapter = controlAdapter();
+  const server = new RemoteServer(adapter);
+  await server.start(48930);
+  const ip = ipOf(server);
+  try {
+    const noToken = await rawPost(ip, server.port, "/control/send", server.host, { text: "hi" });
+    assert.equal(noToken.status, 401);
+    const wrongToken = await rawPost(ip, server.port, "/control/send?token=deadbeef", server.host, { text: "hi" });
+    assert.equal(wrongToken.status, 401);
+    assert.equal(adapter.calls.length, 0);
+  } finally {
+    server.stop();
+  }
+});
+
+test("POST /control/send with a forged Host header is rejected with 400 even with a valid token", async () => {
+  if (!lanAddress()) return;
+  const adapter = controlAdapter();
+  const server = new RemoteServer(adapter);
+  const info = await server.start(48931);
+  const ip = ipOf(server);
+  try {
+    const res = await rawPost(ip, server.port, `/control/send?token=${info.token}`, "evil.example.com", { text: "hi" });
+    assert.equal(res.status, 400);
+    assert.equal(adapter.calls.length, 0);
+  } finally {
+    server.stop();
+  }
+});
+
+test("POST /control/send with a valid token dispatches a 'send' message to onControl (the same path onWebviewMessage's 'send' case uses)", async () => {
+  if (!lanAddress()) return;
+  const adapter = controlAdapter();
+  const server = new RemoteServer(adapter);
+  const info = await server.start(48932);
+  const ip = ipOf(server);
+  try {
+    const res = await rawPost(ip, server.port, `/control/send?token=${info.token}`, server.host, { text: "hello from the phone" });
+    assert.equal(res.status, 202);
+    assert.deepEqual(adapter.calls, [{ type: "send", text: "hello from the phone" }]);
+  } finally {
+    server.stop();
+  }
+});
+
+test("POST /control/send is rejected 409 while the agent is busy — the phone can't race the desktop into a second turn", async () => {
+  if (!lanAddress()) return;
+  const adapter = controlAdapter({ busy: true });
+  const server = new RemoteServer(adapter);
+  const info = await server.start(48933);
+  const ip = ipOf(server);
+  try {
+    const res = await rawPost(ip, server.port, `/control/send?token=${info.token}`, server.host, { text: "hello" });
+    assert.equal(res.status, 409);
+    assert.equal(adapter.calls.length, 0); // never dispatched — busy check happens before onControl
+  } finally {
+    server.stop();
+  }
+});
+
+test("POST /control/send with missing/blank text is rejected with 400", async () => {
+  if (!lanAddress()) return;
+  const adapter = controlAdapter();
+  const server = new RemoteServer(adapter);
+  const info = await server.start(48934);
+  const ip = ipOf(server);
+  try {
+    const missing = await rawPost(ip, server.port, `/control/send?token=${info.token}`, server.host, {});
+    assert.equal(missing.status, 400);
+    const blank = await rawPost(ip, server.port, `/control/send?token=${info.token}`, server.host, { text: "   " });
+    assert.equal(blank.status, 400);
+    assert.equal(adapter.calls.length, 0);
+  } finally {
+    server.stop();
+  }
+});
+
+test("POST /control/permission with a valid token dispatches a 'permissionChoice' message — same map onWebviewMessage's case uses", async () => {
+  if (!lanAddress()) return;
+  const adapter = controlAdapter();
+  const server = new RemoteServer(adapter);
+  const info = await server.start(48935);
+  const ip = ipOf(server);
+  try {
+    const res = await rawPost(ip, server.port, `/control/permission?token=${info.token}`, server.host, {
+      id: "call-1",
+      optionId: "allow-once",
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(adapter.calls, [{ type: "permissionChoice", id: "call-1", optionId: "allow-once" }]);
+  } finally {
+    server.stop();
+  }
+});
+
+test("POST /control/permission without a valid token is rejected with 401", async () => {
+  if (!lanAddress()) return;
+  const adapter = controlAdapter();
+  const server = new RemoteServer(adapter);
+  await server.start(48936);
+  const ip = ipOf(server);
+  try {
+    const res = await rawPost(ip, server.port, "/control/permission", server.host, { id: "x", optionId: "y" });
+    assert.equal(res.status, 401);
+    assert.equal(adapter.calls.length, 0);
+  } finally {
+    server.stop();
+  }
+});
+
+test("POST /control/permission is NOT blocked by the busy flag — resolving a mid-turn permission must always be allowed through", async () => {
+  if (!lanAddress()) return;
+  const adapter = controlAdapter({ busy: true });
+  const server = new RemoteServer(adapter);
+  const info = await server.start(48937);
+  const ip = ipOf(server);
+  try {
+    const res = await rawPost(ip, server.port, `/control/permission?token=${info.token}`, server.host, {
+      id: "call-1",
+      optionId: "allow-once",
+    });
+    assert.equal(res.status, 200);
+    assert.equal(adapter.calls.length, 1);
+  } finally {
+    server.stop();
+  }
+});
+
+test("POST /control/setMode with a valid token dispatches a 'setMode' message", async () => {
+  if (!lanAddress()) return;
+  const adapter = controlAdapter();
+  const server = new RemoteServer(adapter);
+  const info = await server.start(48938);
+  const ip = ipOf(server);
+  try {
+    const res = await rawPost(ip, server.port, `/control/setMode?token=${info.token}`, server.host, { mode: "approve" });
+    assert.equal(res.status, 200);
+    assert.deepEqual(adapter.calls, [{ type: "setMode", mode: "approve" }]);
+  } finally {
+    server.stop();
+  }
+});
+
+test("control routes 501 when the adapter doesn't support onControl (view-only adapter, matching Phase A's shape)", async () => {
+  if (!lanAddress()) return;
+  const server = new RemoteServer(fakeAdapter()); // no isBusy/onControl — a view-only adapter shape
+  const info = await server.start(48939);
+  const ip = ipOf(server);
+  try {
+    const res = await rawPost(ip, server.port, `/control/send?token=${info.token}`, server.host, { text: "hi" });
+    assert.equal(res.status, 501);
+  } finally {
+    server.stop();
+  }
+});
+
+test("malformed JSON body on a control route is rejected with 400, not a crash", async () => {
+  if (!lanAddress()) return;
+  const adapter = controlAdapter();
+  const server = new RemoteServer(adapter);
+  const info = await server.start(48940);
+  const ip = ipOf(server);
+  try {
+    const res = await new Promise((resolve, reject) => {
+      const req = http.request(
+        {
+          host: ip,
+          port: server.port,
+          path: `/control/send?token=${info.token}`,
+          method: "POST",
+          headers: { Host: server.host, "Content-Type": "application/json" },
+        },
+        (r) => {
+          let b = "";
+          r.on("data", (d) => (b += d));
+          r.on("end", () => resolve({ status: r.statusCode, body: b }));
+        },
+      );
+      req.on("error", reject);
+      req.end("{not valid json");
+    });
+    assert.equal(res.status, 400);
+    assert.equal(adapter.calls.length, 0);
+  } finally {
+    server.stop();
+  }
+});
+
+test("unknown /control/* path 404s; a GET to a control path is rejected (control routes are POST-only)", async () => {
+  if (!lanAddress()) return;
+  const adapter = controlAdapter();
+  const server = new RemoteServer(adapter);
+  const info = await server.start(48941);
+  const ip = ipOf(server);
+  try {
+    const unknown = await rawPost(ip, server.port, `/control/nope?token=${info.token}`, server.host, {});
+    assert.equal(unknown.status, 404);
+    const getInstead = await rawGet(ip, server.port, `/control/send?token=${info.token}`, server.host);
+    assert.equal(getInstead.status, 404); // GET isn't routed for /control/* at all — falls through to the GET 404 branch
+  } finally {
+    server.stop();
   }
 });

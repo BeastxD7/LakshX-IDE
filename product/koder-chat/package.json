@@ -65,7 +65,7 @@
       },
       {
         "command": "koder.enableRemoteAccess",
-        "title": "Koder: Enable Remote Access (view this chat from your phone)"
+        "title": "Koder: Enable Remote Access (view and control this chat from your phone)"
       },
       {
         "command": "koder.disableRemoteAccess",
