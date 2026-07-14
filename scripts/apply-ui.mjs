@@ -117,4 +117,35 @@ if (existsSync(copilotBuild)) {
   }
 }
 
+// 3b. build-system tweak: patchWin32DependenciesTask (win32 packaging) probes
+// every .node/rg.exe/etc dependency binary for an existing Authenticode
+// signature via `signtool.exe verify` before rcedit touches it, and hard-
+// crashes the whole build ("spawn signtool.exe ENOENT") if the Windows SDK
+// isn't installed — which it isn't on stock GitHub-hosted windows-2022
+// runners, and we have no code-signing certificate to use it with anyway.
+// Treat "signtool not present" as "nothing to strip" instead of a fatal
+// error; genuine signtool failures (SDK present, real error) still reject.
+const gulpfileVscode = join(upstream, "build", "gulpfile.vscode.ts");
+{
+  let src = readFileSync(gulpfileVscode, "utf8");
+  const before = "\t\tproc.on('error', reject);\n\t\tproc.on('exit', code => resolve(code === 0));";
+  const after =
+    "\t\tproc.on('error', (err) => {\n" +
+    "\t\t\t// signtool.exe (Windows SDK) not installed on this runner and no cert\n" +
+    "\t\t\t// to use it with — nothing to verify, so nothing to strip either.\n" +
+    "\t\t\tif ((err as NodeJS.ErrnoException).code === 'ENOENT') { resolve(false); return; }\n" +
+    "\t\t\treject(err);\n" +
+    "\t\t});\n" +
+    "\t\tproc.on('exit', code => resolve(code === 0));";
+  if (!src.includes(before)) {
+    console.error(
+      "upstream/build/gulpfile.vscode.ts: expected hasAuthenticodeSignature's signtool.exe spawn to patch, but it wasn't found — upstream's format may have changed. Fix scripts/apply-ui.mjs's patch."
+    );
+    process.exit(1);
+  }
+  src = src.replace(before, after);
+  writeFileSync(gulpfileVscode, src);
+  console.log("patched build/gulpfile.vscode.ts (signtool.exe ENOENT no longer fatal)");
+}
+
 console.log("Koder UI applied.");
