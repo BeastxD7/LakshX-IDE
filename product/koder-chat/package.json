@@ -51,6 +51,10 @@
       {
         "command": "koder.openProviderSettings",
         "title": "Koder: Edit Provider Config File (JSON)"
+      },
+      {
+        "command": "koder.openFeedbackLog",
+        "title": "Koder: Open Feedback Log"
       }
     ],
     "keybindings": [

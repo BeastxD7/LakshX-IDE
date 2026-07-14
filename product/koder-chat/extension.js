@@ -170,6 +170,33 @@ function chatsDir() {
   return dir;
 }
 
+// ---------- local feedback log (~/.koder/feedback/<yyyy-mm>.jsonl) ----------
+// Intentionally 100% local: no network calls, no telemetry, no cloud sync of
+// any kind. This is the entire mechanism — nothing here phones home, and
+// nothing here is a stub or hook for a future sync feature. If cloud sync is
+// ever built, it will be a separate, explicit feature, not an extension of
+// this file.
+function feedbackDir() {
+  const dir = path.join(os.homedir(), ".koder", "feedback");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function feedbackFile(date = new Date()) {
+  const ym = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+  return path.join(feedbackDir(), `${ym}.jsonl`);
+}
+
+/** Best-effort text extraction from a tool_call_update's ACP `content` array. */
+function extractToolOutputText(u) {
+  try {
+    const c = u.content?.[0]?.content;
+    return c?.type === "text" ? c.text : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 class AgentViewProvider {
   constructor(context) {
     this.context = context;
@@ -181,6 +208,7 @@ class AgentViewProvider {
     this.chatId = `chat-${Date.now()}`;
     this.chatTitle = null;
     this.mode = "review";
+    this.currentModel = null; // best-effort, for feedback-log context only
   }
 
   resolveWebviewView(view) {
@@ -297,6 +325,7 @@ class AgentViewProvider {
     });
     await this.acp.request("initialize", { protocolVersion: 1, clientCapabilities: {} });
     const models = await this.acp.request("koder/models", {});
+    this.currentModel ??= models.defaultModel;
     await this.loadOrNewSession(resumeSessionId, cwd);
     this.post({ type: "ready", models });
     return true;
@@ -331,10 +360,13 @@ class AgentViewProvider {
         this.post({ type: "modeChanged", mode: u.currentModeId, auto: true });
         break;
       case "tool_call":
-        this.post({ type: "tool", id: u.toolCallId, title: u.title, kind: u.kind, status: u.status });
+        // rawInput is carried through (previously dropped) so the feedback
+        // log can show what a tool was actually called with, not just its
+        // display title.
+        this.post({ type: "tool", id: u.toolCallId, title: u.title, kind: u.kind, status: u.status, input: u.rawInput });
         break;
       case "tool_call_update":
-        this.post({ type: "toolUpdate", id: u.toolCallId, status: u.status });
+        this.post({ type: "toolUpdate", id: u.toolCallId, status: u.status, output: extractToolOutputText(u) });
         break;
     }
   }
@@ -388,25 +420,83 @@ class AgentViewProvider {
     });
   }
 
+  /**
+   * Send a prompt as a brand-new turn (used by both the composer's "send"
+   * and the retry button — retry is just this replayed with the recovered
+   * original prompt text).
+   */
+  async sendPrompt(text) {
+    if (!(await this.ensureAgent())) return;
+    this.post({ type: "user", text });
+    if (!this.chatTitle) this.chatTitle = text.slice(0, 48);
+    this.post({ type: "turnStart" });
+    try {
+      const res = await this.acp.request("session/prompt", {
+        sessionId: this.sessionId,
+        prompt: [{ type: "text", text }],
+      });
+      this.post({ type: "turnEnd", stopReason: res.stopReason });
+    } catch (err) {
+      this.post({ type: "system", text: `error: ${err.message}` });
+      this.post({ type: "turnEnd", stopReason: "error" });
+    }
+  }
+
+  /**
+   * v1 turn correlation for feedback/retry: there is no formal promptId
+   * system yet (a separate, later feature), so "the response being rated"
+   * is approximated as everything in the transcript after the most recent
+   * "user" event. Good enough for now, but it means feedback/retry always
+   * refers to the latest turn even if the user clicks controls on an older
+   * message further up in a long session — worth revisiting once turns
+   * carry real IDs.
+   */
+  turnContext() {
+    let uIdx = -1;
+    for (let i = this.transcript.length - 1; i >= 0; i--) {
+      if (this.transcript[i].type === "user") { uIdx = i; break; }
+    }
+    const userPromptText = uIdx >= 0 ? this.transcript[uIdx].text : "";
+    const after = uIdx >= 0 ? this.transcript.slice(uIdx + 1) : [];
+    const assistantResponseText = after.filter((e) => e.type === "chunk").map((e) => e.text).join("");
+    const toolsById = new Map();
+    for (const e of after) {
+      if (e.type === "tool") {
+        toolsById.set(e.id, { name: e.title, kind: e.kind, input: e.input, isError: false, outputSummary: undefined });
+      } else if (e.type === "toolUpdate") {
+        const t = toolsById.get(e.id);
+        if (t) {
+          t.isError = e.status === "failed";
+          if (e.output) t.outputSummary = String(e.output).slice(0, 500);
+        }
+      }
+    }
+    return { userPromptText, assistantResponseText, toolCalls: [...toolsById.values()] };
+  }
+
+  /** Append one structured entry to this month's local feedback JSONL. */
+  logFeedback(fields) {
+    const entry = {
+      ts: new Date().toISOString(),
+      chatId: this.chatId,
+      sessionId: this.sessionId,
+      model: this.currentModel,
+      mode: this.mode,
+      ...fields,
+    };
+    try {
+      fs.appendFileSync(feedbackFile(), JSON.stringify(entry) + "\n");
+    } catch (err) {
+      this.log.appendLine(`feedback log write failed: ${err.message}`);
+    }
+    return entry;
+  }
+
   async onWebviewMessage(m) {
     switch (m.type) {
-      case "send": {
-        if (!(await this.ensureAgent())) return;
-        this.post({ type: "user", text: m.text });
-        if (!this.chatTitle) this.chatTitle = m.text.slice(0, 48);
-        this.post({ type: "turnStart" });
-        try {
-          const res = await this.acp.request("session/prompt", {
-            sessionId: this.sessionId,
-            prompt: [{ type: "text", text: m.text }],
-          });
-          this.post({ type: "turnEnd", stopReason: res.stopReason });
-        } catch (err) {
-          this.post({ type: "system", text: `error: ${err.message}` });
-          this.post({ type: "turnEnd", stopReason: "error" });
-        }
+      case "send":
+        await this.sendPrompt(m.text);
         break;
-      }
       case "permissionChoice": {
         const w = this.permissionWaiters.get(m.id);
         if (w) {
@@ -416,6 +506,7 @@ class AgentViewProvider {
         break;
       }
       case "setModel":
+        this.currentModel = m.model;
         if (this.acp && this.sessionId) {
           await this.acp.request("koder/set_model", { sessionId: this.sessionId, model: m.model });
         }
@@ -460,6 +551,36 @@ class AgentViewProvider {
         break;
       case "planDecision":
         await this.planDecision(m.decision);
+        break;
+      case "feedback": {
+        // thumbs up/down submitted from the review form under a message.
+        const ctx = this.turnContext();
+        this.logFeedback({
+          rating: m.rating, // "up" | "down"
+          comment: m.comment,
+          expected: m.expected,
+          wentWrong: m.wentWrong,
+          ...ctx,
+        });
+        break;
+      }
+      case "retryMessage": {
+        // Log what the retry is reacting to, then resend the original user
+        // prompt as a fresh turn. v1 scope only: this does NOT remove the
+        // prior (unhelpful) response from history/context, it just appends
+        // a new attempt after it — a real "regenerate that rewinds history"
+        // is a separate, larger feature (docs/research/07, P0.6).
+        const ctx = this.turnContext();
+        this.logFeedback({ rating: "retry", ...ctx });
+        if (ctx.userPromptText) {
+          await this.sendPrompt(ctx.userPromptText);
+        } else {
+          this.post({ type: "system", text: "Nothing to retry yet." });
+        }
+        break;
+      }
+      case "openFeedbackLog":
+        vscode.commands.executeCommand("koder.openFeedbackLog");
         break;
       case "cancel":
         this.acp?.notify("session/cancel", { sessionId: this.sessionId });
@@ -529,6 +650,7 @@ class AgentViewProvider {
         // opening the settings sheet.
         const state = readProviderState();
         const providers = PROVIDER_IDS.filter((id) => state.set[id]);
+        this.currentModel ??= state.defaultModel;
         this.post({ type: "ready", models: { defaultModel: state.defaultModel, providers } });
         break;
       }
@@ -661,6 +783,14 @@ async function activate(context) {
       const file = path.join(dir, "providers.json");
       fs.mkdirSync(dir, { recursive: true });
       if (!fs.existsSync(file)) fs.writeFileSync(file, PROVIDERS_TEMPLATE);
+      const doc = await vscode.workspace.openTextDocument(file);
+      vscode.window.showTextDocument(doc);
+    }),
+    vscode.commands.registerCommand("koder.openFeedbackLog", async () => {
+      // Opens this month's local feedback JSONL — the "give you the log
+      // file" step from a one-click command, no file-hunting required.
+      const file = feedbackFile();
+      if (!fs.existsSync(file)) fs.writeFileSync(file, "");
       const doc = await vscode.workspace.openTextDocument(file);
       vscode.window.showTextDocument(doc);
     }),

@@ -18,6 +18,14 @@ let busy = false;
 let codeStore = {};
 let codeSeq = 0;
 
+// ---------- feedback (thumbs / retry) turn tracking ----------
+// Tracks the most recently rendered agent message bubble and whether the
+// in-progress turn actually produced any text, so the thumbs/retry row can
+// be attached once, at the end of a turn, only when there is a real
+// response to react to (never for pure tool-only turns).
+let lastAgentEl = null;
+let turnHasText = false;
+
 // ---------- rendering ----------
 function renderRich(raw) {
   if (window.koderMarkdown) {
@@ -71,6 +79,8 @@ function streamText(text) {
     streamRaw = "";
   }
   streamRaw += text;
+  lastAgentEl = streamEl;
+  turnHasText = true;
   if (!renderTimer) {
     renderTimer = setTimeout(() => {
       renderTimer = null;
@@ -220,6 +230,102 @@ function showPlanBar(relPath) {
   });
 }
 
+// ---------- feedback (thumbs up/down, retry) ----------
+// Rendered inline, right below a completed assistant message — not a
+// full-screen overlay like settings/history. Everything here posts to the
+// extension, which does the actual local, offline JSONL logging; this file
+// only builds the UI and the message payloads.
+function attachFeedback(msgEl) {
+  const wrap = document.createElement("div");
+  wrap.className = "feedback";
+  wrap.innerHTML = `<div class="feedback-actions">
+    <button class="ghost fb-btn" data-act="up" title="Good response" aria-label="Good response">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 22V11M2 13v7a2 2 0 0 0 2 2h14.3a2 2 0 0 0 2-1.7l1.4-9A2 2 0 0 0 19.7 9H14l1-5.5a2 2 0 0 0-3.7-1.3L7 9"/></svg>
+    </button>
+    <button class="ghost fb-btn" data-act="down" title="Needs work" aria-label="Needs work">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2v11M22 11V4a2 2 0 0 0-2-2H5.7a2 2 0 0 0-2 1.7l-1.4 9A2 2 0 0 0 4.3 15H10l-1 5.5a2 2 0 0 0 3.7 1.3L17 15"/></svg>
+    </button>
+    <button class="ghost fb-btn" data-act="retry" title="Retry with the same prompt" aria-label="Retry">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.3M21 3v6h-6"/></svg>
+    </button>
+  </div>`;
+  msgEl.insertAdjacentElement("afterend", wrap);
+  wrap.addEventListener("click", (e) => {
+    const btn = e.target.closest(".fb-btn");
+    if (!btn || btn.disabled) return;
+    if (btn.dataset.act === "retry") {
+      if (busy) return;
+      vscode.postMessage({ type: "retryMessage" });
+      const note = document.createElement("span");
+      note.className = "fb-note";
+      note.textContent = "Retrying…";
+      btn.insertAdjacentElement("afterend", note);
+      setTimeout(() => note.remove(), 2500);
+      return;
+    }
+    for (const b of wrap.querySelectorAll('.fb-btn[data-act="up"], .fb-btn[data-act="down"]')) {
+      b.classList.toggle("active", b === btn);
+    }
+    openFeedbackForm(wrap, btn.dataset.act);
+  });
+  scrollBottom();
+}
+
+function openFeedbackForm(wrap, kind) {
+  let form = wrap.querySelector(".feedback-form");
+  if (form) {
+    if (form.dataset.kind === kind) { form.hidden = !form.hidden; return; }
+    form.remove(); // switched from "Good" to "Needs work" (or vice versa) — rebuild for the new kind
+    form = null;
+  }
+  form = document.createElement("div");
+  form.className = "feedback-form";
+  form.dataset.kind = kind;
+  form.innerHTML = kind === "up"
+    ? `<input type="text" class="fb-comment" placeholder="Anything you want to add? (optional)">
+       <div class="feedback-form-actions"><div class="spacer"></div><button class="fb-submit">Submit</button></div>`
+    : `<textarea class="fb-expected" rows="2" placeholder="What did you expect?"></textarea>
+       <textarea class="fb-wrong" rows="2" placeholder="What went wrong?"></textarea>
+       <div class="feedback-form-actions">
+         <button class="ghost fb-viewlog">View log for this response</button>
+         <div class="spacer"></div>
+         <button class="fb-submit">Submit</button>
+       </div>`;
+  wrap.appendChild(form);
+  form.querySelector(".fb-viewlog")?.addEventListener("click", () =>
+    vscode.postMessage({ type: "openFeedbackLog" }),
+  );
+  form.querySelector(".fb-submit").addEventListener("click", () => {
+    if (kind === "up") {
+      vscode.postMessage({ type: "feedback", rating: "up", comment: form.querySelector(".fb-comment").value.trim() });
+    } else {
+      vscode.postMessage({
+        type: "feedback",
+        rating: "down",
+        expected: form.querySelector(".fb-expected").value.trim(),
+        wentWrong: form.querySelector(".fb-wrong").value.trim(),
+      });
+    }
+    form.remove();
+    for (const b of wrap.querySelectorAll('.fb-btn[data-act="up"], .fb-btn[data-act="down"]')) b.disabled = true;
+    const done = document.createElement("div");
+    done.className = "feedback-done";
+    done.textContent = "Thanks — feedback saved";
+    wrap.appendChild(done);
+    setTimeout(() => done.classList.add("fade"), 1800);
+    setTimeout(() => done.remove(), 2400);
+    scrollBottom();
+  });
+  scrollBottom();
+}
+
+/** Called at every turn boundary (live or replay); no-op if the turn had no text. */
+function maybeAttachFeedback() {
+  if (turnHasText && lastAgentEl) attachFeedback(lastAgentEl);
+  turnHasText = false;
+  lastAgentEl = null;
+}
+
 // ---------- history ----------
 const historyPanel = document.getElementById("historyPanel");
 const historyBody = document.getElementById("historyBody");
@@ -262,12 +368,17 @@ function applyEvent(m, replaying) {
       setModeUI(m.mode);
       if (m.auto) addMsg("system", `Plan complete — switched to ${m.mode} mode.`);
       break;
-    case "turnEnd": if (replaying) flushBulk(); break;
+    case "turnEnd":
+      if (replaying) {
+        flushBulk();
+        maybeAttachFeedback();
+      }
+      break;
   }
 }
 
 let bulkRaw = null;
-function bulkChunk(text) { bulkRaw = (bulkRaw ?? "") + text; }
+function bulkChunk(text) { bulkRaw = (bulkRaw ?? "") + text; turnHasText = true; }
 function flushBulk() {
   if (bulkRaw !== null) {
     codeSeq++;
@@ -275,6 +386,7 @@ function flushBulk() {
     el.className = "msg agent";
     el.innerHTML = renderRich(bulkRaw);
     messagesEl.appendChild(el);
+    lastAgentEl = el;
     bulkRaw = null;
   }
 }
@@ -390,6 +502,8 @@ window.addEventListener("message", (e) => {
       messagesEl.innerHTML = "";
       tools.clear();
       bulkRaw = null;
+      turnHasText = false;
+      lastAgentEl = null;
       for (const ev of m.events) applyEvent(ev, true);
       flushBulk();
       if (m.events.length === 0) showEmpty();
@@ -426,11 +540,16 @@ window.addEventListener("message", (e) => {
       }
       break;
     }
-    case "turnStart": setBusy(true); break;
+    case "turnStart":
+      setBusy(true);
+      turnHasText = false;
+      lastAgentEl = null;
+      break;
     case "turnEnd":
       endStream();
       setBusy(false);
       permissionBar.hidden = true;
+      maybeAttachFeedback();
       break;
     case "showSettings": showSettings(m.providers); break;
     case "providerModels":
@@ -456,6 +575,8 @@ window.addEventListener("message", (e) => {
       setBusy(false);
       setModeUI("review");
       showEmpty();
+      turnHasText = false;
+      lastAgentEl = null;
       break;
   }
 });
