@@ -25,11 +25,24 @@ export class FakeOpenAI {
   port = 0;
 
   private script: ScriptedTurn[] = [];
+  private stallScript: ScriptedTurn[] = [];
   private server: Server | undefined;
 
   /** Queue one or more turns; each request consumes one turn FIFO. */
   enqueue(...turns: ScriptedTurn[]): void {
     this.script.push(...turns);
+  }
+
+  /**
+   * Queue a turn that streams the given events, then goes silent forever —
+   * the connection is deliberately left open (no `[DONE]`, no `res.end()`),
+   * simulating a stalled-but-not-closed SSE stream (dead proxy/VPN/upstream,
+   * TCP alive, no more bytes ever). Checked ahead of the normal script so a
+   * test can queue exactly one of these without disturbing `enqueue()`
+   * ordering for everyone else. The connection is force-closed by `stop()`.
+   */
+  enqueueStall(events: ScriptedTurn): void {
+    this.stallScript.push(events);
   }
 
   async start(): Promise<void> {
@@ -46,6 +59,15 @@ export class FakeOpenAI {
         }
         this.requests.push(parsed);
         this.authHeaders.push(req.headers.authorization);
+
+        const stall = this.stallScript.shift();
+        if (stall) {
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          for (const ev of stall) res.write(`data: ${JSON.stringify(ev)}\n\n`);
+          // deliberately no [DONE], no res.end() — the socket stays open and silent
+          return;
+        }
+
         const turn = this.script.shift();
         if (!turn) {
           res.writeHead(500, { "content-type": "application/json" });
@@ -65,8 +87,13 @@ export class FakeOpenAI {
 
   async stop(): Promise<void> {
     if (!this.server) return;
-    await new Promise<void>((resolve) => this.server!.close(() => resolve()));
+    // `close()`'s callback only fires once every connection has ended — for
+    // a deliberately-stalled (never-closed) connection that would deadlock,
+    // so force-close sockets first/concurrently rather than awaiting close()
+    // before reaching for closeAllConnections().
+    const closed = new Promise<void>((resolve) => this.server!.close(() => resolve()));
     this.server.closeAllConnections?.();
+    await closed;
   }
 }
 

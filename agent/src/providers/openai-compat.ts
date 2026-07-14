@@ -46,6 +46,12 @@ export class OpenAICompatAdapter implements ChatAdapter {
       if (data === "[DONE]") break;
       let ev: any;
       try { ev = JSON.parse(data); } catch { continue; }
+      // some OpenAI-compatible providers (e.g. OpenRouter) emit a
+      // mid-stream `{"error": {...}}` chunk instead of an HTTP error status
+      // — without this check it silently falls through the `!choice`
+      // branch below and the turn ends as an empty, no-explanation
+      // end_turn (spinner clears, no answer, no error surfaced)
+      if (ev.error) throw new Error(`${this.cfg.baseUrl} stream error: ${JSON.stringify(ev.error).slice(0, 400)}`);
       const choice = ev.choices?.[0];
       if (!choice) {
         if (ev.usage) usage = { inputTokens: ev.usage.prompt_tokens, outputTokens: ev.usage.completion_tokens };
