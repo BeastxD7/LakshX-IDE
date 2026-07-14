@@ -4,8 +4,12 @@
   "private": true,
   "description": "Koder Agent Runtime — editor-independent, speaks ACP. Phase 0: ACP client spike driving Claude Code.",
   "type": "module",
+  "bin": { "koder-agent": "./src/server.ts" },
   "scripts": {
-    "spike": "tsx src/spike.ts"
+    "spike": "tsx src/spike.ts",
+    "serve": "tsx src/server.ts",
+    "test": "tsx src/test-client.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.2.1",

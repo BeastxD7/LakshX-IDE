@@ -49,12 +49,12 @@ async function main() {
   });
   const stream = acp.ndJsonStream(
     Writable.toWeb(agentProcess.stdin),
-    Readable.toWeb(agentProcess.stdout),
+    Readable.toWeb(agentProcess.stdout) as ReadableStream<Uint8Array>,
   );
 
   try {
     const result = await acp
-      .client({ name: "koder", version: "0.0.1" })
+      .client({ name: "koder" })
       .onRequest(acp.methods.client.session.requestPermission, async (ctx) => {
         const { toolCall, options } = ctx.params;
         // Phase 0 policy: auto-approve with a logged receipt. The real permission
