@@ -191,6 +191,45 @@ test("GET / serves the mobile page shell without requiring a token", async () =>
   }
 });
 
+// ---------- remote-page.js content regressions ----------
+// remote-page.js has no dedicated test file of its own (it's a hand-built
+// HTML/CSS/JS string, not something node:test can execute in a DOM), so this
+// is the only automated guard against a future edit silently dropping the
+// interactive mode switcher or the keyboard-avoidance CSS this task added —
+// checked here via the one route that actually renders it.
+test("GET / renders a tappable mode switcher (review/approve/auto/royal), not just a read-only badge", async () => {
+  if (!lanAddress()) return;
+  const server = new RemoteServer(fakeAdapter());
+  await server.start(48942);
+  const ip = ipOf(server);
+  try {
+    const res = await rawGet(ip, server.port, "/", server.host);
+    assert.equal(res.status, 200);
+    assert.match(res.body, /id="modeBar"/);
+    for (const mode of ["review", "approve", "auto", "royal"]) {
+      assert.match(res.body, new RegExp(`data-mode="${mode}"`));
+    }
+    // the old read-only span this task replaced should be gone, not just supplemented
+    assert.doesNotMatch(res.body, /id="modeBadge"/);
+    assert.doesNotMatch(res.body, /class="mode-badge"/);
+  } finally {
+    server.stop();
+  }
+});
+
+test("GET / uses dvh (not just vh) on the app shell so the layout tracks the visible viewport", async () => {
+  if (!lanAddress()) return;
+  const server = new RemoteServer(fakeAdapter());
+  await server.start(48943);
+  const ip = ipOf(server);
+  try {
+    const res = await rawGet(ip, server.port, "/", server.host);
+    assert.match(res.body, /100dvh/);
+  } finally {
+    server.stop();
+  }
+});
+
 test("unknown routes 404, non-GET methods are rejected", async () => {
   if (!lanAddress()) return;
   const server = new RemoteServer(fakeAdapter());

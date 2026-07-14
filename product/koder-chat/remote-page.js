@@ -32,13 +32,24 @@ var CSS = [
   "* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }",
   "html, body { height: 100%; margin: 0; padding: 0; background: var(--bg); color: var(--fg);",
   "  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 15px; }",
-  "#app { display: flex; flex-direction: column; min-height: 100vh;",
+  // `100vh`/`100dvh` handle the general case (Safari's collapsing address
+  // bar) but NOT the on-screen keyboard: per spec, viewport units are
+  // explicitly defined to ignore the software keyboard inset, so this line
+  // alone cannot fix the keyboard-covers-composer bug — see the JS
+  // `positionComposer()` below, which is the part that actually does.
+  "#app { display: flex; flex-direction: column; min-height: 100vh; min-height: 100dvh;",
   "  padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }",
-  "#header { display: flex; align-items: center; gap: 10px; padding: 14px 16px;",
+  "#header { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px 10px;",
   "  border-bottom: 1px solid var(--hairline); position: sticky; top: 0; background: var(--bg); z-index: 5; }",
+  "#header .headerTop { display: flex; align-items: center; gap: 10px; }",
   "#header .ws { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
-  "#header .mode-badge { font-size: 11px; color: #c8b6ff; background: var(--accent-soft);",
-  "  border-radius: 99px; padding: 3px 10px; margin-left: auto; text-transform: capitalize; }",
+  "#modeBar { display: flex; background: rgba(0,0,0,0.25); border: 1px solid var(--hairline);",
+  "  border-radius: 10px; padding: 3px; gap: 3px; }",
+  "#modeBar .modeBtn { flex: 1; border: none; background: transparent; color: var(--muted); font: inherit;",
+  "  font-size: 12.5px; font-weight: 600; padding: 0; min-height: 40px; border-radius: 8px;",
+  "  text-transform: capitalize; }",
+  "#modeBar .modeBtn:active { opacity: 0.6; }",
+  "#modeBar .modeBtn.active { background: var(--accent-soft); color: #c8b6ff; }",
   "#dot { width: 8px; height: 8px; border-radius: 99px; background: #4ed8a2; flex: none; }",
   "#dot.reconnecting { background: #ffb454; animation: pulse 1s ease-in-out infinite; }",
   "#dot.lost { background: #ff6b81; }",
@@ -83,8 +94,14 @@ var CSS = [
   "#reconnectScreen.show { display: block; }",
   "#reconnectScreen .title { color: var(--fg); font-weight: 600; margin-bottom: 8px; font-size: 15px; }",
   "#reconnectScreen .hint { font-size: 12.5px; line-height: 1.6; }",
-  "#composer { display: flex; align-items: flex-end; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--hairline);",
-  "  position: sticky; bottom: 0; background: var(--bg); }",
+  // `position: sticky; bottom: 0` is the no-JS fallback (and the resting
+  // state once the keyboard is closed); `positionComposer()` in the script
+  // below switches this to `position: fixed` with a JS-computed `bottom`
+  // whenever `visualViewport` reports the visible area has shrunk (the
+  // keyboard opening), which sticky positioning alone cannot react to.
+  "#composer { display: flex; align-items: flex-end; gap: 8px; padding: 10px 12px;",
+  "  padding-bottom: calc(10px + env(safe-area-inset-bottom)); border-top: 1px solid var(--hairline);",
+  "  position: sticky; bottom: 0; background: var(--bg); z-index: 6; }",
   "#composerInput { flex: 1; resize: none; min-height: 20px; max-height: 120px; background: rgba(255,255,255,0.06);",
   "  border: 1px solid var(--hairline); border-radius: 10px; color: var(--fg); font: inherit; font-size: 14.5px;",
   "  padding: 9px 12px; line-height: 1.4; }",
@@ -116,7 +133,7 @@ var SCRIPT = [
   "  var messagesEl = document.getElementById('messages');",
   "  var dotEl = document.getElementById('dot');",
   "  var wsNameEl = document.getElementById('wsName');",
-  "  var modeBadgeEl = document.getElementById('modeBadge');",
+  "  var modeBarEl = document.getElementById('modeBar');",
   "  var bannerEl = document.getElementById('banner');",
   "  var reconnectEl = document.getElementById('reconnectScreen');",
   "  var composerEl = document.getElementById('composer');",
@@ -137,6 +154,7 @@ var SCRIPT = [
   "  var streamEl = null, streamRaw = '';",
   "  var tools = {};",
   "  var busy = false;",
+  "  var currentMode = 'review';",
   "",
   "  function note(text, ms) {",
   "    noteEl.textContent = text;",
@@ -171,6 +189,82 @@ var SCRIPT = [
   "  inputEl.addEventListener('keydown', function (e) {",
   "    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitPrompt(); }",
   "  });",
+  "",
+  "  // ---------- keyboard-avoidance ----------",
+  "  // Why 100vh/100dvh alone cannot fix \"composer hidden behind the",
+  "  // keyboard\": viewport units (including dvh/svh) are specified to track",
+  "  // browser-chrome collapse (the address bar hiding/showing), NOT the",
+  "  // on-screen keyboard — opening the keyboard only ever shows up as a",
+  "  // `visualViewport` resize (the visible area shrinks; the layout",
+  "  // viewport that `vh`/`dvh` and `position: sticky` are computed against",
+  "  // does not). So the composer has to be repositioned in direct response",
+  "  // to that event, not just re-sized with a CSS unit swap.",
+  "  function positionComposer() {",
+  "    var vv = window.visualViewport;",
+  "    if (!vv) return; // no visualViewport support — CSS 'position: sticky; bottom: 0' fallback still applies",
+  "    var gap = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);",
+  "    composerEl.style.position = 'fixed';",
+  "    composerEl.style.left = '0';",
+  "    composerEl.style.right = '0';",
+  "    composerEl.style.bottom = gap + 'px';",
+  "    messagesEl.style.paddingBottom = (composerEl.offsetHeight + 20) + 'px';",
+  "    scrollBottom();",
+  "  }",
+  "  if (window.visualViewport) {",
+  "    window.visualViewport.addEventListener('resize', positionComposer);",
+  "    window.visualViewport.addEventListener('scroll', positionComposer);",
+  "    positionComposer();",
+  "  }",
+  "  window.addEventListener('orientationchange', function () { setTimeout(positionComposer, 60); });",
+  "  inputEl.addEventListener('focus', function () {",
+  "    // the keyboard animates in over roughly 250-300ms on iOS/Android; a",
+  "    // couple of follow-up checks let the composer settle in the right",
+  "    // place once the keyboard is fully open, not just wherever it landed",
+  "    // on the very first resize tick.",
+  "    setTimeout(positionComposer, 60);",
+  "    setTimeout(positionComposer, 320);",
+  "  });",
+  "  inputEl.addEventListener('blur', function () { setTimeout(positionComposer, 60); });",
+  "",
+  "  // ---------- mode switcher ----------",
+  "  function setModeUI(mode) {",
+  "    currentMode = mode;",
+  "    if (!modeBarEl) return;",
+  "    var btns = modeBarEl.querySelectorAll('.modeBtn');",
+  "    for (var i = 0; i < btns.length; i++) {",
+  "      btns[i].classList.toggle('active', btns[i].getAttribute('data-mode') === mode);",
+  "    }",
+  "  }",
+  "  if (modeBarEl) {",
+  "    modeBarEl.addEventListener('click', function (e) {",
+  "      var b = e.target.closest('.modeBtn');",
+  "      if (!b) return;",
+  "      var mode = b.getAttribute('data-mode');",
+  "      var prevMode = currentMode;",
+  "      if (mode === prevMode) return;",
+  "      if (mode === 'royal') {",
+  "        // Royal mode has no safety floor and no permission prompts — full",
+  "        // autonomy. A phone is an easier surface to fat-finger on (no",
+  "        // visual proximity to the desktop to catch a mistake), so this is",
+  "        // the one mode switch that gets an extra confirmation on mobile,",
+  "        // even though a single desktop click switches modes with none.",
+  "        var confirmed = window.confirm(",
+  "          'Switch to Royal mode? Full autonomy: no safety floor, no permission prompts. ' +",
+  "          'Every action still runs (logged and checkpointed) but nothing stops it in the moment.'",
+  "        );",
+  "        if (!confirmed) return;",
+  "      }",
+  "      setModeUI(mode);",
+  "      controlPost('/control/setMode', { mode: mode })",
+  "        .then(function (r) {",
+  "          if (!r.ok) { setModeUI(prevMode); note('Could not switch mode — check your connection.', 2500); return; }",
+  "          if (mode === 'royal') {",
+  "            note('If this is the first switch to Royal in this workspace, confirm the warning dialog on the desktop.', 4500);",
+  "          }",
+  "        })",
+  "        .catch(function () { setModeUI(prevMode); note('Could not switch mode — check your connection.', 2500); });",
+  "    });",
+  "  }",
   "",
   "  function escapeHtml(s) {",
   "    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');",
@@ -275,7 +369,7 @@ var SCRIPT = [
   "      }",
   "      case 'system': endStream(); addMsg('system', m.text); break;",
   "      case 'modeChanged':",
-  "        modeBadgeEl.textContent = m.mode;",
+  "        setModeUI(m.mode);",
   "        if (m.auto) addMsg('system', 'Switched to ' + m.mode + ' mode.');",
   "        break;",
   "      case 'turnStart': endStream(); setBusy(true); break;",
@@ -287,7 +381,7 @@ var SCRIPT = [
   "",
   "  function renderSnapshot(snap) {",
   "    wsNameEl.textContent = snap.workspace || 'Koder';",
-  "    modeBadgeEl.textContent = snap.mode || 'review';",
+  "    setModeUI(snap.mode || 'review');",
   "    messagesEl.innerHTML = '';",
   "    tools = {};",
   "    endStream();",
@@ -347,7 +441,7 @@ var SCRIPT = [
   "            return;",
   "          }",
   "          if (m.type === 'replay') {",
-  "            renderSnapshot({ workspace: wsNameEl.textContent, mode: modeBadgeEl.textContent, transcript: m.events });",
+  "            renderSnapshot({ workspace: wsNameEl.textContent, mode: currentMode, transcript: m.events });",
   "            return;",
   "          }",
   "          applyEvent(m);",
@@ -377,9 +471,16 @@ function renderMobilePage() {
     "</head>\n<body>\n" +
     '<div id="app">\n' +
     '  <div id="header">\n' +
-    '    <span id="dot"></span>\n' +
-    '    <span class="ws" id="wsName">Koder</span>\n' +
-    '    <span class="mode-badge" id="modeBadge">review</span>\n' +
+    '    <div class="headerTop">\n' +
+    '      <span id="dot"></span>\n' +
+    '      <span class="ws" id="wsName">Koder</span>\n' +
+    "    </div>\n" +
+    '    <div id="modeBar" role="tablist" aria-label="Agent mode">\n' +
+    '      <button type="button" class="modeBtn" data-mode="review">Review</button>\n' +
+    '      <button type="button" class="modeBtn" data-mode="approve">Approve</button>\n' +
+    '      <button type="button" class="modeBtn" data-mode="auto">Auto</button>\n' +
+    '      <button type="button" class="modeBtn" data-mode="royal">Royal</button>\n' +
+    "    </div>\n" +
     "  </div>\n" +
     '  <div id="banner"></div>\n' +
     '  <div id="messages"><div class="empty"><div class="title">Connecting…</div>' +
