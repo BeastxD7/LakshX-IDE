@@ -18266,7 +18266,7 @@ var OpenAICompatAdapter = class {
       for (const tc of delta.tool_calls ?? []) {
         const slot = calls[tc.index] ??= { id: "", name: "", args: "" };
         if (tc.id) slot.id = tc.id;
-        if (tc.function?.name) slot.name += tc.function.name;
+        if (tc.function?.name && !slot.name) slot.name = tc.function.name;
         if (tc.function?.arguments) slot.args += tc.function.arguments;
       }
       if (choice.finish_reason) finish = choice.finish_reason;
@@ -18297,7 +18297,7 @@ function toWire2(messages) {
     if (m.role === "assistant") {
       const text = m.content.filter((b) => b.type === "text").map((b) => b.text).join("");
       const toolUses = m.content.filter((b) => b.type === "tool_use");
-      const msg = { role: "assistant", content: text || null };
+      const msg = { role: "assistant", content: text || (toolUses.length ? null : "") };
       if (toolUses.length) {
         msg.tool_calls = toolUses.map((t) => ({
           id: t.id,
@@ -18309,7 +18309,8 @@ function toWire2(messages) {
     } else {
       const results = m.content.filter((b) => b.type === "tool_result");
       for (const r of results) {
-        out.push({ role: "tool", tool_call_id: r.tool_use_id, content: r.content });
+        const content = r.is_error ? `[tool failed] ${r.content}` : r.content;
+        out.push({ role: "tool", tool_call_id: r.tool_use_id, content });
       }
       const text = m.content.filter((b) => b.type === "text").map((b) => b.text).join("");
       if (text) out.push({ role: "user", content: text });
@@ -18344,10 +18345,11 @@ var TOOLS = [
     },
     async run(input, cwd) {
       const content = await (0, import_promises.readFile)(abs(cwd, input.path), "utf8");
-      const lines = content.split("\n");
+      if (content === "") return "(empty file)";
+      const lines = content.replace(/\n$/, "").split("\n");
       const start = Math.max(0, (input.offset ?? 1) - 1);
       const slice = lines.slice(start, start + (input.limit ?? 800));
-      return slice.map((l, i) => `${start + i + 1}	${l}`).join("\n") || "(empty file)";
+      return slice.map((l, i) => `${start + i + 1}	${l}`).join("\n") || "(offset past end of file)";
     }
   },
   {
@@ -18390,7 +18392,7 @@ var TOOLS = [
       const count = content.split(input.old_string).length - 1;
       if (count === 0) throw new Error("old_string not found in file");
       if (count > 1) throw new Error(`old_string matches ${count} times \u2014 add surrounding context to make it unique`);
-      await (0, import_promises.writeFile)(p, content.replace(input.old_string, input.new_string), "utf8");
+      await (0, import_promises.writeFile)(p, content.replace(input.old_string, () => input.new_string), "utf8");
       return `edited ${p}`;
     }
   },
@@ -18540,17 +18542,24 @@ async function runPrompt(session, userText, cb, signal) {
   const adapter = makeAdapter(provider.kind, provider);
   const allowedTools = session.mode === "review" ? TOOLS.filter((t) => !t.dangerous) : TOOLS;
   session.history.push({ role: "user", content: [{ type: "text", text: userText }] });
+  const userMessageIndex = session.history.length - 1;
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     if (signal?.aborted) return "cancelled";
-    const result = await adapter.runTurn({
-      model,
-      system: systemPrompt(session.cwd, session.mode),
-      messages: session.history,
-      tools: allowedTools.map(({ name, description, input_schema }) => ({ name, description, input_schema })),
-      signal,
-      onText: cb.onText,
-      onThinking: cb.onThinking
-    });
+    let result;
+    try {
+      result = await adapter.runTurn({
+        model,
+        system: systemPrompt(session.cwd, session.mode),
+        messages: session.history,
+        tools: allowedTools.map(({ name, description, input_schema }) => ({ name, description, input_schema })),
+        signal,
+        onText: cb.onText,
+        onThinking: cb.onThinking
+      });
+    } catch (err) {
+      if (session.history.length === userMessageIndex + 1) session.history.pop();
+      throw err;
+    }
     const assistantBlocks = [];
     if (result.text) assistantBlocks.push({ type: "text", text: result.text });
     for (const tc of result.toolCalls) {

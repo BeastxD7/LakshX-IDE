@@ -7,7 +7,26 @@ on:
   workflow_dispatch:
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.17.0"
+      - name: Install agent deps
+        working-directory: agent
+        run: npm ci
+      - name: Typecheck runtime
+        working-directory: agent
+        run: npm run typecheck
+      - name: Unit + E2E tests
+        working-directory: agent
+        run: npm run test:unit
+
   build:
+    needs: test
     strategy:
       fail-fast: false
       matrix:
