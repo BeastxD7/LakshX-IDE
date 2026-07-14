@@ -8,6 +8,7 @@ import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import { availableProviders, loadConfig } from "./config.js";
 import { runPrompt, type AgentSession } from "./loop.js";
+import { probeProvider } from "./providers/validate.js";
 
 interface Session extends AgentSession {
   pending?: AbortController;
@@ -33,6 +34,12 @@ acp
     const cfg = loadConfig();
     return { defaultModel: cfg.defaultModel, providers: availableProviders(cfg) };
   })
+  // Koder extension: validate a provider key and list its live models
+  .onRequest(
+    "koder/validate",
+    (v: unknown) => v as { provider: string; apiKey?: string },
+    async (ctx) => probeProvider(ctx.params.provider, ctx.params.apiKey),
+  )
   // Koder extension: set the model for a session ("provider/model")
   .onRequest(
     "koder/set_model",

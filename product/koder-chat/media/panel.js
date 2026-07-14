@@ -156,6 +156,7 @@ const PROVIDERS = {
 };
 
 let settingsState = { defaultModel: "", set: {} };
+const liveModels = {}; // provider → models fetched from the provider's API
 
 function renderSettings() {
   const sel = document.getElementById("providerSelect");
@@ -179,9 +180,9 @@ function renderSettings() {
       <input type="password" id="keyInput" placeholder="${isSet ? "•••••••• (leave blank to keep)" : "sk-…"}">
     </div>
     <div class="field">
-      <label>Model</label>
+      <label>Model ${liveModels[providerId] ? `<span class="pill">${liveModels[providerId].length} live from provider</span>` : ""}</label>
       <select id="modelSelect" class="big">
-        ${p.models
+        ${(liveModels[providerId] ?? p.models)
           .map((m) => {
             const full = `${providerId}/${m}`;
             return `<option value="${m}" ${full === currentDefault ? "selected" : ""}>${m}</option>`;
@@ -192,12 +193,19 @@ function renderSettings() {
       <input id="customModel" placeholder="model id" hidden>
     </div>
     <label class="check"><input type="checkbox" id="makeDefault" checked> Use as default model</label>
+    <div id="provStatus" class="muted"></div>
   `;
 
   document.getElementById("providerSelect").addEventListener("change", renderSettings);
   document.getElementById("modelSelect").addEventListener("change", (e) => {
     document.getElementById("customModel").hidden = e.target.value !== "__custom__";
   });
+
+  // key already saved for this provider → fetch its real model list
+  if (isSet && !liveModels[providerId]) {
+    document.getElementById("provStatus").textContent = "checking key + fetching models…";
+    vscode.postMessage({ type: "validateProvider", provider: providerId });
+  }
 }
 
 function showSettings(state) {
@@ -319,6 +327,19 @@ window.addEventListener("message", (e) => {
     case "showSettings":
       showSettings(m.providers);
       break;
+    case "providerModels":
+      liveModels[m.provider] = m.models;
+      if (!settingsPanel.hidden) renderSettings();
+      break;
+    case "providerStatus": {
+      if (m.ok && m.models?.length) {
+        liveModels[m.provider] = m.models;
+        if (!settingsPanel.hidden) renderSettings();
+      }
+      const el = document.getElementById("provStatus");
+      if (el) el.textContent = m.ok ? `✓ key valid — ${m.models?.length ?? 0} models` : `✗ ${m.error}`;
+      break;
+    }
     case "system":
       addMsg("system", m.text);
       break;

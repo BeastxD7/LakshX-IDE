@@ -289,14 +289,30 @@ class AgentViewProvider {
         break;
       case "saveProviders": {
         saveProviderState(m.keys, m.defaultModel);
-        this.post({ type: "system", text: "Provider settings saved." });
-        // refresh model list with the new keys
+        if (!this.acp) await this.ensureAgent();
+        // validate the key that was just saved, live against the provider
+        const savedProvider = Object.keys(m.keys)[0];
+        if (savedProvider && this.acp) {
+          this.post({ type: "system", text: `checking ${savedProvider} key…` });
+          const result = await this.acp.request("koder/validate", { provider: savedProvider });
+          if (result.ok) {
+            this.post({ type: "system", text: `✓ ${savedProvider} key valid — ${result.models?.length ?? 0} models available` });
+            this.post({ type: "providerModels", provider: savedProvider, models: result.models ?? [] });
+          } else {
+            this.post({ type: "system", text: `✗ ${savedProvider}: ${result.error}. Check the key and save again.` });
+          }
+        }
         if (this.acp) {
           const models = await this.acp.request("koder/models", {});
           this.post({ type: "ready", models });
-        } else {
-          await this.ensureAgent();
         }
+        break;
+      }
+      case "validateProvider": {
+        if (!this.acp) await this.ensureAgent();
+        if (!this.acp) break;
+        const result = await this.acp.request("koder/validate", { provider: m.provider });
+        this.post({ type: "providerStatus", provider: m.provider, ...result });
         break;
       }
       case "openSettingsFile":
@@ -393,6 +409,10 @@ async function activate(context) {
       vscode.commands.executeCommand("koder.agentView.focus"),
     ),
     vscode.commands.registerCommand("koder.newChat", () => provider.newChat()),
+    vscode.commands.registerCommand("koder.configureProviders", async () => {
+      await vscode.commands.executeCommand("koder.agentView.focus");
+      provider.post({ type: "showSettings", providers: readProviderState() });
+    }),
     vscode.commands.registerCommand("koder.openProviderSettings", async () => {
       const dir = path.join(os.homedir(), ".koder");
       const file = path.join(dir, "providers.json");

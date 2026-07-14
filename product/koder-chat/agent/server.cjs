@@ -18573,6 +18573,36 @@ async function runPrompt(session, userText, cb, signal) {
   return "max_turn_requests";
 }
 
+// src/providers/validate.ts
+async function probeProvider(providerId, overrideKey) {
+  const cfg = loadConfig();
+  const p = cfg.providers[providerId];
+  if (!p) return { ok: false, error: `unknown provider "${providerId}"` };
+  const key = overrideKey ?? p.apiKey;
+  if (!key) return { ok: false, error: "no API key saved" };
+  let url2;
+  let headers;
+  if (p.kind === "anthropic") {
+    url2 = `${p.baseUrl}/v1/models?limit=100`;
+    headers = { "x-api-key": key, "anthropic-version": "2023-06-01" };
+  } else {
+    url2 = `${p.baseUrl}/models`;
+    headers = { authorization: `Bearer ${key}` };
+  }
+  try {
+    const res = await fetch(url2, { headers, signal: AbortSignal.timeout(12e3) });
+    if (!res.ok) {
+      const hint = res.status === 401 || res.status === 403 ? "the provider rejected this key" : res.status === 429 ? "rate limited \u2014 key is probably valid" : `HTTP ${res.status}`;
+      return { ok: res.status === 429, error: `${hint} (${res.status})` };
+    }
+    const j = await res.json();
+    const models = (j.data ?? j.models ?? []).map((m) => m.id ?? m.name).filter((id) => typeof id === "string").map((id) => id.replace(/^models\//, "")).slice(0, 200);
+    return { ok: true, models };
+  } catch (err) {
+    return { ok: false, error: err?.name === "TimeoutError" ? "timed out reaching provider" : String(err?.message ?? err) };
+  }
+}
+
 // src/server.ts
 var sessions = /* @__PURE__ */ new Map();
 agent({ name: "koder-agent" }).onRequest("initialize", async () => ({
@@ -18586,6 +18616,10 @@ agent({ name: "koder-agent" }).onRequest("initialize", async () => ({
   const cfg = loadConfig();
   return { defaultModel: cfg.defaultModel, providers: availableProviders(cfg) };
 }).onRequest(
+  "koder/validate",
+  (v) => v,
+  async (ctx) => probeProvider(ctx.params.provider, ctx.params.apiKey)
+).onRequest(
   "koder/set_model",
   (v) => v,
   async (ctx) => {
