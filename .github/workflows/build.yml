@@ -84,10 +84,20 @@ jobs:
       - name: Install upstream dependencies
         shell: bash
         working-directory: upstream
-        # code-oss's postinstall fires ~40 parallel per-extension npm installs;
-        # on constrained CI runners this occasionally trips a transient spawn
-        # ENOENT — retry before failing the whole (expensive) job over a flake.
+        # code-oss's postinstall fires ~40-50 parallel per-extension npm
+        # installs. macOS runners default to a 256 open-file-descriptor soft
+        # limit (Linux/Windows default much higher) — that many concurrent
+        # npm child processes reliably exhausts it, and Node surfaces the
+        # failure as a misleading "spawn /bin/sh ENOENT" rather than EMFILE.
+        # Confirmed by log evidence: this reproduced identically 3/3 times
+        # at the exact point ~50+ parallel "added N packages" installs had
+        # just finished, even with NPM_CONFIG_AUDIT/FUND disabled (an earlier
+        # fix that turned out to be coincidental — audit output just happened
+        # to be the last thing printed before the real (fd-limit) crash).
+        # Raise the limit before installing; retry loop kept as
+        # defense-in-depth for genuine transient flakes.
         run: |
+          ulimit -n 10240 2>/dev/null || true
           for attempt in 1 2 3; do
             npm ci && exit 0
             echo "npm ci failed (attempt $attempt) — retrying in 15s" >&2
