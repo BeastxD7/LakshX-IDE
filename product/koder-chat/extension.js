@@ -330,6 +330,14 @@ function activate(context) {
   statusItem.command = "koder.openAgent";
   statusItem.show();
 
+  // agent-first IDE: surface the panel on startup (until the user has seen it)
+  if (!context.globalState.get("koder.panelSeen")) {
+    setTimeout(() => {
+      vscode.commands.executeCommand("koder.agentView.focus");
+      context.globalState.update("koder.panelSeen", true);
+    }, 1200);
+  }
+
   context.subscriptions.push(
     statusItem,
     vscode.window.registerWebviewViewProvider("koder.agentView", provider, {

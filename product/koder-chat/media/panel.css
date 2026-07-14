@@ -287,7 +287,18 @@ button.deny { background: rgba(255, 255, 255, 0.1); color: var(--fg); padding: 4
   color: var(--accent);
   margin-bottom: 8px;
 }
+.empty .title { font-weight: 600; font-size: 14px; }
 .empty .hint { font-size: 12px; margin-top: 6px; }
+.empty .cta {
+  margin: 14px auto 6px;
+  display: block;
+  background: var(--accent);
+  color: #fff;
+  padding: 8px 18px;
+  border-radius: 9px;
+  font-size: 13px;
+}
+.empty .cta:hover { background: #8f73ff; }
 .empty kbd {
   background: rgba(255, 255, 255, 0.08);
   border-radius: 4px;

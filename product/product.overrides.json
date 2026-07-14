@@ -38,9 +38,9 @@
   "defaultChatAgent": {
     "name": "Koder",
     "providerName": "Koder",
-    "extensionId": "koder.koder-chat",
-    "chatExtensionId": "koder.koder-chat",
-    "providerExtensionId": "koder.koder-chat",
+    "extensionId": "koder.inert",
+    "chatExtensionId": "koder.inert",
+    "providerExtensionId": "koder.inert",
     "completionsAdvancedSetting": "koder.agent",
     "providerUriSetting": "koder.agent.providerUri",
     "provider": {

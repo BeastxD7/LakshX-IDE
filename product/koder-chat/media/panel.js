@@ -16,9 +16,14 @@ let busy = false;
 function showEmpty() {
   messagesEl.innerHTML = `<div class="empty">
     <div class="mark">✦</div>
-    <div>Koder Agent</div>
-    <div class="hint">Your code, your keys, your agent.<br><kbd>⏎</kbd> send · <kbd>⇧⏎</kbd> newline</div>
+    <div class="title">Koder Agent</div>
+    <div class="hint">Your code, your keys, your agent.</div>
+    <button id="ctaProviders" class="cta">⚙ Configure AI Providers</button>
+    <div class="hint"><kbd>⌘L</kbd> open · <kbd>⏎</kbd> send · <kbd>⇧⏎</kbd> newline</div>
   </div>`;
+  document.getElementById("ctaProviders")?.addEventListener("click", () =>
+    vscode.postMessage({ type: "openSettings" }),
+  );
 }
 showEmpty();
 
@@ -198,7 +203,10 @@ window.addEventListener("message", (e) => {
         modelEl.appendChild(opt);
       }
       if (m.models.providers.length === 0) {
-        addMsg("system", "No API keys configured — click ⚙ to add your keys (BYOK).");
+        // BYOK front and center: open the provider sheet automatically
+        vscode.postMessage({ type: "openSettings" });
+      } else {
+        addMsg("system", `Ready — ${m.models.providers.length} provider(s) configured.`);
       }
       break;
     }
