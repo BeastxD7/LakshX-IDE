@@ -1,0 +1,12 @@
+{
+  // upstream/ is a real, separately-cloned git repo (fetched by
+  // scripts/fetch-vscode.sh) that build scripts patch in place — its
+  // thousands of local diffs (deleted Copilot extension, patched
+  // gulpfile/dirs.ts, etc.) are intentional, never committed anywhere,
+  // and irrelevant to this repo's own history. VS Code auto-detects every
+  // nested .git it finds and shows each one's Source Control status
+  // separately, regardless of the outer .gitignore, which is what makes
+  // the Source Control icon show 4000+ changes. This setting stops that
+  // one nested repo from being tracked/counted at all.
+  "git.ignoredRepositories": ["upstream"]
+}
