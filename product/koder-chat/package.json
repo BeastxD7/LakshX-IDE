@@ -70,6 +70,11 @@
       {
         "command": "koder.disableRemoteAccess",
         "title": "Koder: Disable Remote Access"
+      },
+      {
+        "command": "koder.undoFileChanges",
+        "title": "Undo Agent Changes",
+        "icon": "$(discard)"
       }
     ],
     "keybindings": [
@@ -96,6 +101,11 @@
         {
           "command": "koder.openAgent",
           "group": "navigation@100"
+        },
+        {
+          "command": "koder.undoFileChanges",
+          "when": "koder.fileHasCheckpoint",
+          "group": "navigation@99"
         }
       ],
       "editor/context": [

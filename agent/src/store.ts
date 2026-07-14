@@ -10,8 +10,23 @@ import { scrubSecrets } from "./context.js";
 import type { AgentMode } from "./loop.js";
 import type { ChatMessage } from "./providers/types.js";
 
+/**
+ * One prompt's checkpoint record (docs/research/11-prompt-checkpoints-undo.md
+ * §3.1) — the baseline SHA plus every mutating tool call's own commit, each
+ * with the file list `commitAfterTool()` derived from the shadow-git diff
+ * (never from a tool's declared input path). Both UI undo surfaces (chat
+ * panel per-turn "Files changed", editor-title per-file undo) read from this
+ * one structure — they are two views, not two mechanisms.
+ */
+export interface PromptCheckpoint {
+  promptId: string;
+  baselineSha: string;
+  tools: { toolCallId: string; toolName: string; sha: string; files: string[] }[];
+  createdAt: number;
+}
+
 export interface StoredSession {
-  v: 1;
+  v: 1 | 2;
   id: string;
   cwd: string;
   mode: AgentMode;
@@ -19,6 +34,8 @@ export interface StoredSession {
   createdAt: number;
   updatedAt: number;
   history: ChatMessage[];
+  /** Absent on v1 files — always treated as [] when reading. */
+  checkpoints?: PromptCheckpoint[];
 }
 
 function sessionsDir(): string {
@@ -54,6 +71,7 @@ export function saveSessionSoon(session: {
   mode: AgentMode;
   model?: string;
   history: ChatMessage[];
+  checkpoints?: PromptCheckpoint[];
 }): void {
   const existing = pending.get(session.id);
   if (existing) clearTimeout(existing);
@@ -70,13 +88,20 @@ export function saveSessionSoon(session: {
   );
 }
 
-function writeSessionNow(session: { id: string; cwd: string; mode: AgentMode; model?: string; history: ChatMessage[] }): void {
+function writeSessionNow(session: {
+  id: string;
+  cwd: string;
+  mode: AgentMode;
+  model?: string;
+  history: ChatMessage[];
+  checkpoints?: PromptCheckpoint[];
+}): void {
   const path = sessionPath(session.id);
   const createdAt = createdAtCache.get(session.id) ?? (existsSync(path) ? loadSessionFile(session.id)?.createdAt : undefined) ?? Date.now();
   createdAtCache.set(session.id, createdAt);
 
   const stored: StoredSession = {
-    v: 1,
+    v: 2,
     id: session.id,
     cwd: session.cwd,
     mode: session.mode,
@@ -84,6 +109,7 @@ function writeSessionNow(session: { id: string; cwd: string; mode: AgentMode; mo
     createdAt,
     updatedAt: Date.now(),
     history: scrubHistory(session.history),
+    checkpoints: session.checkpoints ?? [],
   };
   const tmp = `${path}.tmp`;
   writeFileSync(tmp, JSON.stringify(stored));
@@ -93,8 +119,8 @@ function writeSessionNow(session: { id: string; cwd: string; mode: AgentMode; mo
 export function loadSessionFile(id: string): StoredSession | null {
   try {
     const raw = JSON.parse(readFileSync(sessionPath(id), "utf8"));
-    if (raw?.v !== 1 || !Array.isArray(raw.history)) return null;
-    return raw as StoredSession;
+    if ((raw?.v !== 1 && raw?.v !== 2) || !Array.isArray(raw.history)) return null;
+    return { ...raw, checkpoints: Array.isArray(raw.checkpoints) ? raw.checkpoints : [] } as StoredSession;
   } catch {
     return null;
   }

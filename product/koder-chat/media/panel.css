@@ -194,6 +194,42 @@ html, body {
   font-family: var(--mono);
 }
 
+/* ---------- checkpoints: "Files changed" card + undo (docs/research/11 §7) ---------- */
+/* Reuses the .tool card's visual language (left hairline border, muted color,
+   monospace file names) rather than inventing a new pattern. */
+.checkpoint {
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--card);
+  padding: 8px 10px;
+  font-size: 11.5px;
+  animation: rise 0.14s var(--ease);
+}
+.checkpoint .cp-head { color: var(--muted); margin-bottom: 4px; }
+.checkpoint .cp-file {
+  font-family: var(--mono);
+  color: var(--faint);
+  padding: 1px 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.checkpoint .cp-undo-all {
+  margin-top: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--fg);
+}
+.checkpoint .cp-undo-all:hover { background: rgba(255, 255, 255, 0.14); }
+.checkpoint .cp-confirm {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--hairline);
+  animation: rise 0.15s var(--ease);
+}
+.checkpoint .cp-confirm-msg { color: var(--fg); line-height: 1.5; margin-bottom: 8px; }
+.checkpoint .cp-confirm-actions { display: flex; gap: 6px; }
+.checkpoint .cp-confirm-actions button { flex: 1; }
+
 /* ---------- feedback (thumbs / retry / inline review form) ---------- */
 .feedback { margin: -6px 2px 0; animation: rise 0.15s var(--ease); }
 .feedback-actions { display: flex; align-items: center; gap: 2px; }

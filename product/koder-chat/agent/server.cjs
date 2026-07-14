@@ -1,10 +1,31 @@
 #!/usr/bin/env node
 "use strict";
+var __create = Object.create;
 var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __export = (target, all) => {
   for (var name in all)
     __defProp(target, name, { get: all[name], enumerable: true });
 };
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
 
 // src/server.ts
 var import_node_crypto2 = require("node:crypto");
@@ -18036,10 +18057,328 @@ var legacyClientNotificationMethods = /* @__PURE__ */ new Set([
   CLIENT_METHODS.elicitation_complete
 ]);
 
-// src/config.ts
+// src/checkpoint.ts
+var import_node_child_process = require("node:child_process");
+var import_node_crypto = require("node:crypto");
 var import_node_fs = require("node:fs");
+var import_promises = require("node:fs/promises");
 var import_node_os = require("node:os");
 var import_node_path = require("node:path");
+var import_node_util = require("node:util");
+var execFileAsync = (0, import_node_util.promisify)(import_node_child_process.execFile);
+function shadowPaths(cwd) {
+  const hash2 = (0, import_node_crypto.createHash)("sha256").update((0, import_node_path.resolve)(cwd)).digest("hex").slice(0, 16);
+  const dir = (0, import_node_path.join)((0, import_node_os.homedir)(), ".koder", "checkpoints", hash2);
+  return { dir, gitDir: (0, import_node_path.join)(dir, "shadow.git") };
+}
+async function git(gitDir, worktree, args) {
+  return execFileAsync("git", [`--git-dir=${gitDir}`, `--work-tree=${worktree}`, ...args], {
+    cwd: worktree,
+    maxBuffer: 8 * 1024 * 1024
+  });
+}
+async function ensureShadowRepo(cwd) {
+  const worktree = (0, import_node_path.resolve)(cwd);
+  const { dir, gitDir } = shadowPaths(worktree);
+  if ((0, import_node_fs.existsSync)(gitDir)) return gitDir;
+  (0, import_node_fs.mkdirSync)(dir, { recursive: true });
+  await execFileAsync("git", [`--git-dir=${gitDir}`, "init", "-q"]);
+  await git(gitDir, worktree, ["config", "user.email", "royal-checkpoints@koder.local"]);
+  await git(gitDir, worktree, ["config", "user.name", "koder-royal-checkpoints"]);
+  return gitDir;
+}
+async function checkpointBeforeMutation(cwd, label) {
+  try {
+    const worktree = (0, import_node_path.resolve)(cwd);
+    const gitDir = await ensureShadowRepo(worktree);
+    await git(gitDir, worktree, ["add", "-A", "--", ".", ":!**/.git", ":!**/.git/**"]);
+    await git(gitDir, worktree, ["commit", "-q", "--allow-empty", "-m", `royal-checkpoint: ${label}`.slice(0, 500)]);
+    const { stdout } = await git(gitDir, worktree, ["rev-parse", "HEAD"]);
+    return { sha: stdout.trim() || null };
+  } catch {
+    return { sha: null };
+  }
+}
+var MAX_TRACKED_FILES = 5e4;
+var SKIP_DIRS = /* @__PURE__ */ new Set([
+  "node_modules",
+  ".git",
+  "dist",
+  "build",
+  "out",
+  "target",
+  ".venv",
+  "venv",
+  "__pycache__",
+  ".next",
+  ".turbo",
+  "coverage"
+]);
+async function countFilesWalk(dir, cap) {
+  let n = 0;
+  const stack = [dir];
+  while (stack.length && n < cap) {
+    const d = stack.pop();
+    let entries;
+    try {
+      entries = await (0, import_promises.readdir)(d, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (n >= cap) break;
+      if (e.isDirectory()) {
+        if (!SKIP_DIRS.has(e.name)) stack.push((0, import_node_path.join)(d, e.name));
+      } else {
+        n++;
+      }
+    }
+  }
+  return n;
+}
+async function countTrackedFiles(worktree) {
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", worktree, "ls-files"], { maxBuffer: 64 * 1024 * 1024 });
+    const n = stdout.split("\n").filter(Boolean).length;
+    if (n > 0) return n;
+  } catch {
+  }
+  return countFilesWalk(worktree, MAX_TRACKED_FILES + 1);
+}
+var guardCache = /* @__PURE__ */ new Map();
+async function initShadowRepo(cwd) {
+  const worktree = (0, import_node_path.resolve)(cwd);
+  const reason = "workspace has more than 50,000 files \u2014 checkpointing/undo is disabled here to avoid an unbounded per-call scan cost";
+  const cached2 = guardCache.get(worktree);
+  if (cached2 !== void 0) return cached2 ? { ok: true } : { ok: false, reason };
+  try {
+    const n = await countTrackedFiles(worktree);
+    const ok = n <= MAX_TRACKED_FILES;
+    guardCache.set(worktree, ok);
+    if (!ok) return { ok: false, reason };
+    await ensureShadowRepo(worktree);
+    return { ok: true };
+  } catch {
+    guardCache.set(worktree, true);
+    return { ok: true };
+  }
+}
+async function stageAll(gitDir, worktree) {
+  try {
+    await git(gitDir, worktree, ["add", "-A", "--", ".", ":!**/.git", ":!**/.git/**"]);
+  } catch {
+  }
+}
+async function currentHead(gitDir, worktree) {
+  try {
+    const { stdout } = await git(gitDir, worktree, ["rev-parse", "HEAD"]);
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+async function hasStagedChanges(gitDir, worktree) {
+  try {
+    await git(gitDir, worktree, ["diff", "--cached", "--quiet"]);
+    return false;
+  } catch {
+    return true;
+  }
+}
+async function diffFiles(gitDir, worktree, a, b) {
+  try {
+    const { stdout } = await git(gitDir, worktree, ["diff", "--raw", "--no-renames", a, b]);
+    const files = [];
+    for (const line of stdout.split("\n")) {
+      if (!line) continue;
+      const m = line.match(/^:(\d+) (\d+) [0-9a-f]+\.* [0-9a-f]+\.* \S+\t(.+)$/);
+      if (!m) continue;
+      const [, oldMode, newMode, path] = m;
+      if (oldMode === "160000" || newMode === "160000") continue;
+      files.push(path);
+    }
+    return files;
+  } catch {
+    return [];
+  }
+}
+function isAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function withLock(dir, fn) {
+  const lockPath = (0, import_node_path.join)(dir, "koder.lock");
+  const deadline = Date.now() + 2e3;
+  let acquired = false;
+  for (; ; ) {
+    try {
+      (0, import_node_fs.mkdirSync)(lockPath, { recursive: false });
+      (0, import_node_fs.writeFileSync)((0, import_node_path.join)(lockPath, "info.json"), JSON.stringify({ pid: process.pid, startedAt: Date.now() }));
+      acquired = true;
+      break;
+    } catch (err) {
+      if (err?.code !== "EEXIST") break;
+      try {
+        const info = JSON.parse((0, import_node_fs.readFileSync)((0, import_node_path.join)(lockPath, "info.json"), "utf8"));
+        if (typeof info.pid === "number" && !isAlive(info.pid)) {
+          (0, import_node_fs.rmSync)(lockPath, { recursive: true, force: true });
+          continue;
+        }
+      } catch {
+      }
+      if (Date.now() > deadline) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    if (acquired) {
+      try {
+        (0, import_node_fs.rmSync)(lockPath, { recursive: true, force: true });
+      } catch {
+      }
+    }
+  }
+}
+async function checkpointBaseline(cwd, promptId) {
+  try {
+    const worktree = (0, import_node_path.resolve)(cwd);
+    const init = await initShadowRepo(worktree);
+    if (!init.ok) return { sha: null };
+    const { dir, gitDir } = shadowPaths(worktree);
+    return await withLock(dir, async () => {
+      await stageAll(gitDir, worktree);
+      const dirty = await hasStagedChanges(gitDir, worktree);
+      if (!dirty) {
+        const head = await currentHead(gitDir, worktree);
+        if (head) return { sha: head };
+      }
+      await git(gitDir, worktree, ["commit", "-q", "--allow-empty", "-m", `baseline:${promptId}`]);
+      return { sha: await currentHead(gitDir, worktree) };
+    });
+  } catch {
+    return { sha: null };
+  }
+}
+async function commitAfterTool(cwd, promptId, toolCallId, toolName, path) {
+  try {
+    const worktree = (0, import_node_path.resolve)(cwd);
+    const init = await initShadowRepo(worktree);
+    if (!init.ok) return { sha: null, files: [] };
+    const { dir, gitDir } = shadowPaths(worktree);
+    return await withLock(dir, async () => {
+      const prevHead = await currentHead(gitDir, worktree);
+      if (path) {
+        try {
+          await git(gitDir, worktree, ["add", "--", path]);
+        } catch {
+          await stageAll(gitDir, worktree);
+        }
+      } else {
+        await stageAll(gitDir, worktree);
+      }
+      await git(gitDir, worktree, ["commit", "-q", "--allow-empty", "-m", `tool:${promptId}:${toolCallId}:${toolName}`]);
+      const sha = await currentHead(gitDir, worktree);
+      const files = prevHead && sha ? await diffFiles(gitDir, worktree, prevHead, sha) : [];
+      return { sha, files };
+    });
+  } catch {
+    return { sha: null, files: [] };
+  }
+}
+async function diffQuiet(gitDir, worktree, ref, path) {
+  try {
+    await git(gitDir, worktree, ["diff", "--quiet", ref, "--", path]);
+    return true;
+  } catch (err) {
+    if (err?.code === 1) return false;
+    return true;
+  }
+}
+async function hasConflict(cwd, path, targetSha) {
+  const worktree = (0, import_node_path.resolve)(cwd);
+  const { gitDir } = shadowPaths(worktree);
+  if (await diffQuiet(gitDir, worktree, targetSha, path)) return false;
+  if (await diffQuiet(gitDir, worktree, "HEAD", path)) return false;
+  return true;
+}
+async function undoPaths(cwd, paths, targetSha, force = false) {
+  const worktree = (0, import_node_path.resolve)(cwd);
+  const { dir, gitDir } = shadowPaths(worktree);
+  if (paths.length === 0) return { ok: true, reverted: [] };
+  if (!force) {
+    const conflicts = [];
+    for (const p of paths) if (await hasConflict(worktree, p, targetSha)) conflicts.push(p);
+    if (conflicts.length) return { ok: false, conflict: { paths: conflicts } };
+  }
+  return withLock(dir, async () => {
+    await git(gitDir, worktree, ["checkout", targetSha, "--", ...paths]);
+    return { ok: true, reverted: paths };
+  });
+}
+async function undoFile(cwd, path, targetSha, force = false) {
+  return undoPaths(cwd, [path], targetSha, force);
+}
+var COMPACT_THRESHOLD_BYTES = 250 * 1024 * 1024;
+async function dirSizeBytes(dir) {
+  let total = 0;
+  const stack = [dir];
+  const { stat: stat2 } = await import("node:fs/promises");
+  while (stack.length) {
+    const d = stack.pop();
+    let entries;
+    try {
+      entries = await (0, import_promises.readdir)(d, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      const full = (0, import_node_path.join)(d, e.name);
+      if (e.isDirectory()) stack.push(full);
+      else {
+        try {
+          total += (await stat2(full)).size;
+        } catch {
+        }
+      }
+    }
+  }
+  return total;
+}
+async function maybeCompact(cwd) {
+  try {
+    const worktree = (0, import_node_path.resolve)(cwd);
+    const { dir, gitDir } = shadowPaths(worktree);
+    if (!(0, import_node_fs.existsSync)(gitDir)) return { compacted: false };
+    const size = await dirSizeBytes(gitDir);
+    if (size < COMPACT_THRESHOLD_BYTES) return { compacted: false };
+    return await withLock(dir, async () => {
+      const { stdout: curBranchOut } = await git(gitDir, worktree, ["symbolic-ref", "--short", "HEAD"]).catch(() => ({
+        stdout: "master"
+      }));
+      const mainBranch = curBranchOut.trim() || "master";
+      const tmpBranch = `koder-compact-${Date.now()}`;
+      await git(gitDir, worktree, ["checkout", "--orphan", tmpBranch]);
+      await git(gitDir, worktree, ["commit", "-q", "--allow-empty", "-m", "checkpoint history compacted"]);
+      await git(gitDir, worktree, ["branch", "-M", mainBranch]);
+      await git(gitDir, worktree, ["reflog", "expire", "--expire=now", "--all"]);
+      await git(gitDir, worktree, ["gc", "--prune=now", "--quiet"]);
+      return { compacted: true };
+    });
+  } catch {
+    return { compacted: false };
+  }
+}
+
+// src/config.ts
+var import_node_fs2 = require("node:fs");
+var import_node_os2 = require("node:os");
+var import_node_path2 = require("node:path");
 var PRESETS = {
   anthropic: { kind: "anthropic", baseUrl: "https://api.anthropic.com", envKey: "ANTHROPIC_API_KEY" },
   openai: { kind: "openai", baseUrl: "https://api.openai.com/v1", envKey: "OPENAI_API_KEY" },
@@ -18055,7 +18394,7 @@ var PRESETS = {
 function loadConfig() {
   let fileCfg = {};
   try {
-    fileCfg = JSON.parse((0, import_node_fs.readFileSync)((0, import_node_path.join)((0, import_node_os.homedir)(), ".koder", "providers.json"), "utf8"));
+    fileCfg = JSON.parse((0, import_node_fs2.readFileSync)((0, import_node_path2.join)((0, import_node_os2.homedir)(), ".koder", "providers.json"), "utf8"));
   } catch {
   }
   const providers = {};
@@ -18097,18 +18436,18 @@ function availableProviders(cfg) {
 }
 
 // src/audit.ts
+var import_node_fs4 = require("node:fs");
+var import_node_os4 = require("node:os");
+var import_node_path4 = require("node:path");
+
+// src/context.ts
+var import_node_child_process2 = require("node:child_process");
 var import_node_fs3 = require("node:fs");
 var import_node_os3 = require("node:os");
 var import_node_path3 = require("node:path");
-
-// src/context.ts
-var import_node_child_process = require("node:child_process");
-var import_node_fs2 = require("node:fs");
-var import_node_os2 = require("node:os");
-var import_node_path2 = require("node:path");
 function tryExec(cmd, cwd) {
   try {
-    return (0, import_node_child_process.execSync)(cmd, { cwd, timeout: 1500, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+    return (0, import_node_child_process2.execSync)(cmd, { cwd, timeout: 1500, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
   } catch {
     return null;
   }
@@ -18124,13 +18463,13 @@ function envBlock(cwd) {
     lines.push(`git: branch=${branch}${dirtyCount ? `, ${dirtyCount} uncommitted change(s)` : ", clean"}`);
   }
   try {
-    const entries = (0, import_node_fs2.readdirSync)(cwd, { withFileTypes: true }).filter((e) => !e.name.startsWith(".")).slice(0, 40).map((e) => e.isDirectory() ? `${e.name}/` : e.name);
+    const entries = (0, import_node_fs3.readdirSync)(cwd, { withFileTypes: true }).filter((e) => !e.name.startsWith(".")).slice(0, 40).map((e) => e.isDirectory() ? `${e.name}/` : e.name);
     if (entries.length) lines.push(`workspace root:
   ${entries.join("\n  ")}`);
   } catch {
   }
   try {
-    const pkg = JSON.parse((0, import_node_fs2.readFileSync)((0, import_node_path2.join)(cwd, "package.json"), "utf8"));
+    const pkg = JSON.parse((0, import_node_fs3.readFileSync)((0, import_node_path3.join)(cwd, "package.json"), "utf8"));
     const scripts = Object.keys(pkg.scripts ?? {}).slice(0, 12);
     lines.push(`package.json: ${pkg.name ?? "(unnamed)"}${scripts.length ? `, scripts: ${scripts.join(", ")}` : ""}`);
   } catch {
@@ -18141,11 +18480,11 @@ ${lines.join("\n")}
 }
 var ruleCache = /* @__PURE__ */ new Map();
 function readRuleFile(path, cap) {
-  if (!(0, import_node_fs2.existsSync)(path)) return null;
-  const mtimeMs = (0, import_node_fs2.statSync)(path).mtimeMs;
+  if (!(0, import_node_fs3.existsSync)(path)) return null;
+  const mtimeMs = (0, import_node_fs3.statSync)(path).mtimeMs;
   const cached2 = ruleCache.get(path);
   if (cached2 && cached2.mtimeMs === mtimeMs) return cached2.text;
-  let text = (0, import_node_fs2.readFileSync)(path, "utf8");
+  let text = (0, import_node_fs3.readFileSync)(path, "utf8");
   if (text.length > cap) {
     text = text.slice(0, cap) + `
 \u2026[truncated at ${cap.toLocaleString()} chars]\u2026`;
@@ -18159,7 +18498,7 @@ var USER_RULE_CAP = 8e3;
 function loadRules(cwd) {
   const blocks = [];
   for (const rel of PROJECT_RULE_CANDIDATES) {
-    const text = readRuleFile((0, import_node_path2.join)(cwd, rel), PROJECT_RULE_CAP);
+    const text = readRuleFile((0, import_node_path3.join)(cwd, rel), PROJECT_RULE_CAP);
     if (text) {
       blocks.push(
         `## Project instructions
@@ -18171,7 +18510,7 @@ ${text}
       break;
     }
   }
-  const userText = readRuleFile((0, import_node_path2.join)((0, import_node_os2.homedir)(), ".koder", "rules.md"), USER_RULE_CAP);
+  const userText = readRuleFile((0, import_node_path3.join)((0, import_node_os3.homedir)(), ".koder", "rules.md"), USER_RULE_CAP);
   if (userText) {
     blocks.push(`## User preferences
 <user-rules>
@@ -18196,13 +18535,13 @@ function scrubSecrets(text) {
 
 // src/audit.ts
 function auditDir() {
-  const dir = (0, import_node_path3.join)((0, import_node_os3.homedir)(), ".koder", "royal-audit");
-  (0, import_node_fs3.mkdirSync)(dir, { recursive: true });
+  const dir = (0, import_node_path4.join)((0, import_node_os4.homedir)(), ".koder", "royal-audit");
+  (0, import_node_fs4.mkdirSync)(dir, { recursive: true });
   return dir;
 }
 function auditFile(date5 = /* @__PURE__ */ new Date()) {
   const ym = `${date5.getFullYear()}-${String(date5.getMonth() + 1).padStart(2, "0")}`;
-  return (0, import_node_path3.join)(auditDir(), `${ym}.jsonl`);
+  return (0, import_node_path4.join)(auditDir(), `${ym}.jsonl`);
 }
 function summarizeText(text, max = 500) {
   const scrubbed = scrubSecrets(text);
@@ -18218,52 +18557,10 @@ function summarizeInput(input) {
 function logRoyalAudit(entry) {
   const full = { ts: (/* @__PURE__ */ new Date()).toISOString(), ...entry };
   try {
-    (0, import_node_fs3.appendFileSync)(auditFile(), JSON.stringify(full) + "\n");
+    (0, import_node_fs4.appendFileSync)(auditFile(), JSON.stringify(full) + "\n");
   } catch {
   }
   return full;
-}
-
-// src/checkpoint.ts
-var import_node_child_process2 = require("node:child_process");
-var import_node_crypto = require("node:crypto");
-var import_node_fs4 = require("node:fs");
-var import_node_os4 = require("node:os");
-var import_node_path4 = require("node:path");
-var import_node_util = require("node:util");
-var execFileAsync = (0, import_node_util.promisify)(import_node_child_process2.execFile);
-function shadowPaths(cwd) {
-  const hash2 = (0, import_node_crypto.createHash)("sha256").update((0, import_node_path4.resolve)(cwd)).digest("hex").slice(0, 16);
-  const dir = (0, import_node_path4.join)((0, import_node_os4.homedir)(), ".koder", "checkpoints", hash2);
-  return { dir, gitDir: (0, import_node_path4.join)(dir, "shadow.git") };
-}
-async function git(gitDir, worktree, args) {
-  return execFileAsync("git", [`--git-dir=${gitDir}`, `--work-tree=${worktree}`, ...args], {
-    cwd: worktree,
-    maxBuffer: 8 * 1024 * 1024
-  });
-}
-async function ensureShadowRepo(cwd) {
-  const worktree = (0, import_node_path4.resolve)(cwd);
-  const { dir, gitDir } = shadowPaths(worktree);
-  if ((0, import_node_fs4.existsSync)(gitDir)) return gitDir;
-  (0, import_node_fs4.mkdirSync)(dir, { recursive: true });
-  await execFileAsync("git", [`--git-dir=${gitDir}`, "init", "-q"]);
-  await git(gitDir, worktree, ["config", "user.email", "royal-checkpoints@koder.local"]);
-  await git(gitDir, worktree, ["config", "user.name", "koder-royal-checkpoints"]);
-  return gitDir;
-}
-async function checkpointBeforeMutation(cwd, label) {
-  try {
-    const worktree = (0, import_node_path4.resolve)(cwd);
-    const gitDir = await ensureShadowRepo(worktree);
-    await git(gitDir, worktree, ["add", "-A", "--", ".", ":!**/.git", ":!**/.git/**"]);
-    await git(gitDir, worktree, ["commit", "-q", "--allow-empty", "-m", `royal-checkpoint: ${label}`.slice(0, 500)]);
-    const { stdout } = await git(gitDir, worktree, ["rev-parse", "HEAD"]);
-    return { sha: stdout.trim() || null };
-  } catch {
-    return { sha: null };
-  }
 }
 
 // src/floor.ts
@@ -18773,7 +19070,7 @@ function toWire2(messages) {
 // src/tools.ts
 var import_node_child_process3 = require("node:child_process");
 var import_node_fs5 = require("node:fs");
-var import_promises = require("node:fs/promises");
+var import_promises2 = require("node:fs/promises");
 var import_node_path6 = require("node:path");
 var import_node_util2 = require("node:util");
 var execAsync = (0, import_node_util2.promisify)(import_node_child_process3.exec);
@@ -18892,7 +19189,7 @@ var TOOLS = [
       required: ["path"]
     },
     async run(input, cwd) {
-      const content = await (0, import_promises.readFile)(abs(cwd, input.path), "utf8");
+      const content = await (0, import_promises2.readFile)(abs(cwd, input.path), "utf8");
       if (content === "") return "(empty file)";
       const lines = content.replace(/\n$/, "").split("\n");
       const start = Math.max(0, (input.offset ?? 1) - 1);
@@ -18916,8 +19213,8 @@ var TOOLS = [
     },
     async run(input, cwd) {
       const p = abs(cwd, input.path);
-      await (0, import_promises.mkdir)((0, import_node_path6.dirname)(p), { recursive: true });
-      await (0, import_promises.writeFile)(p, input.content, "utf8");
+      await (0, import_promises2.mkdir)((0, import_node_path6.dirname)(p), { recursive: true });
+      await (0, import_promises2.writeFile)(p, input.content, "utf8");
       return `wrote ${input.content.length} chars to ${p}`;
     }
   },
@@ -18937,11 +19234,11 @@ var TOOLS = [
     },
     async run(input, cwd) {
       const p = abs(cwd, input.path);
-      const content = await (0, import_promises.readFile)(p, "utf8");
+      const content = await (0, import_promises2.readFile)(p, "utf8");
       const count = content.split(input.old_string).length - 1;
       if (count === 0) throw new Error("old_string not found in file");
       if (count > 1) throw new Error(`old_string matches ${count} times \u2014 add surrounding context to make it unique`);
-      await (0, import_promises.writeFile)(p, content.replace(input.old_string, () => input.new_string), "utf8");
+      await (0, import_promises2.writeFile)(p, content.replace(input.old_string, () => input.new_string), "utf8");
       return `edited ${p}`;
     }
   },
@@ -18956,11 +19253,11 @@ var TOOLS = [
     },
     async run(input, cwd) {
       const p = abs(cwd, input.path ?? ".");
-      const entries = await (0, import_promises.readdir)(p);
+      const entries = await (0, import_promises2.readdir)(p);
       const out = [];
       for (const e of entries.slice(0, 500)) {
         try {
-          const s = await (0, import_promises.stat)((0, import_node_path6.resolve)(p, e));
+          const s = await (0, import_promises2.stat)((0, import_node_path6.resolve)(p, e));
           out.push(s.isDirectory() ? `${e}/` : e);
         } catch {
           out.push(e);
@@ -19113,7 +19410,7 @@ function wrapToolOutput(name, path, content) {
 ${safe}
 </tool_output>`;
 }
-async function runPrompt(session, userText, cb, signal) {
+async function runPrompt(session, userText, cb, promptId, signal) {
   const cfg = loadConfig();
   const { provider, model } = resolveModel(cfg, session.model);
   const adapter = makeAdapter(provider.kind, provider);
@@ -19122,6 +19419,7 @@ async function runPrompt(session, userText, cb, signal) {
   const userMessageIndex = session.history.length - 1;
   session.editFails ??= /* @__PURE__ */ new Map();
   cb.onHistoryChanged?.();
+  let baselineTaken = false;
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     if (signal?.aborted) return "cancelled";
     const prompt = systemPrompt(session.cwd, session.mode);
@@ -19206,6 +19504,11 @@ async function runPrompt(session, userText, cb, signal) {
         }
         continue;
       }
+      if (!isRoyal && spec.dangerous && !baselineTaken) {
+        const bl = await checkpointBaseline(session.cwd, promptId);
+        cb.onBaseline?.(bl.sha);
+        baselineTaken = true;
+      }
       const sig = `${tc.name}:${JSON.stringify(tc.input ?? {})}`;
       if (sig === session.lastToolSig) {
         session.toolRepeatCount = (session.toolRepeatCount ?? 1) + 1;
@@ -19232,6 +19535,10 @@ async function runPrompt(session, userText, cb, signal) {
         const path = tc.input?.path;
         if (tc.name === "edit_file") session.editFails.delete(path);
         if (tc.name === "read_file" && path) session.editFails.delete(path);
+        if (!isRoyal && spec.dangerous) {
+          const cp = await commitAfterTool(session.cwd, promptId, tc.id, tc.name, path);
+          if (cp.sha) cb.onCheckpoint?.({ toolCallId: tc.id, toolName: tc.name, sha: cp.sha, files: cp.files });
+        }
         if (session.toolRepeatCount === 2) {
           output += "\n[note: identical call repeated \u2014 the result has not changed; try a different approach]";
         } else if (session.toolRepeatCount >= 4) {
@@ -19342,14 +19649,15 @@ function writeSessionNow(session) {
   const createdAt = createdAtCache.get(session.id) ?? ((0, import_node_fs6.existsSync)(path) ? loadSessionFile(session.id)?.createdAt : void 0) ?? Date.now();
   createdAtCache.set(session.id, createdAt);
   const stored = {
-    v: 1,
+    v: 2,
     id: session.id,
     cwd: session.cwd,
     mode: session.mode,
     model: session.model,
     createdAt,
     updatedAt: Date.now(),
-    history: scrubHistory(session.history)
+    history: scrubHistory(session.history),
+    checkpoints: session.checkpoints ?? []
   };
   const tmp = `${path}.tmp`;
   (0, import_node_fs6.writeFileSync)(tmp, JSON.stringify(stored));
@@ -19358,8 +19666,8 @@ function writeSessionNow(session) {
 function loadSessionFile(id) {
   try {
     const raw = JSON.parse((0, import_node_fs6.readFileSync)(sessionPath(id), "utf8"));
-    if (raw?.v !== 1 || !Array.isArray(raw.history)) return null;
-    return raw;
+    if (raw?.v !== 1 && raw?.v !== 2 || !Array.isArray(raw.history)) return null;
+    return { ...raw, checkpoints: Array.isArray(raw.checkpoints) ? raw.checkpoints : [] };
   } catch {
     return null;
   }
@@ -19385,6 +19693,21 @@ function pruneSessions(keepNewest = 200, maxAgeDays = 60) {
 }
 
 // src/server.ts
+function laterOverlap(checkpoints, promptId) {
+  const target = checkpoints.find((c) => c.promptId === promptId);
+  if (!target) return {};
+  const targetFiles = new Set(target.tools.flatMap((t) => t.files));
+  const overlaps = {};
+  for (const c of checkpoints) {
+    if (c.createdAt <= target.createdAt) continue;
+    for (const t of c.tools) {
+      for (const f of t.files) {
+        if (targetFiles.has(f)) (overlaps[f] ??= []).push(c.promptId);
+      }
+    }
+  }
+  return overlaps;
+}
 var sessions = /* @__PURE__ */ new Map();
 pruneSessions();
 var MODES = [
@@ -19410,7 +19733,7 @@ agent({ name: "koder-agent" }).onRequest("initialize", async () => ({
   agentCapabilities: { loadSession: true }
 })).onRequest("authenticate", async () => ({})).onRequest("session/new", async (ctx) => {
   const sessionId = (0, import_node_crypto2.randomUUID)();
-  sessions.set(sessionId, { cwd: ctx.params.cwd, history: [], mode: "review" });
+  sessions.set(sessionId, { cwd: ctx.params.cwd, history: [], mode: "review", checkpoints: [] });
   return {
     sessionId,
     modes: { currentModeId: "review", availableModes: MODES }
@@ -19423,7 +19746,8 @@ agent({ name: "koder-agent" }).onRequest("initialize", async () => ({
     cwd: cwd ?? saved.cwd,
     mode: saved.mode,
     model: saved.model,
-    history: saved.history
+    history: saved.history,
+    checkpoints: saved.checkpoints ?? []
   });
   const notify = (update) => ctx.client.notify(methods.client.session.update, { sessionId, update });
   for (const msg of saved.history) {
@@ -19479,9 +19803,25 @@ agent({ name: "koder-agent" }).onRequest("initialize", async () => ({
   session.pending?.abort();
   const abort = new AbortController();
   session.pending = abort;
+  const promptId = ctx.params?._meta?.promptId ?? (0, import_node_crypto2.randomUUID)();
   const text = prompt.filter((b) => b.type === "text").map((b) => b.text).join("\n");
   const notify = (update) => ctx.client.notify(methods.client.session.update, { sessionId, update });
-  const persist = () => saveSessionSoon({ id: sessionId, cwd: session.cwd, mode: session.mode, model: session.model, history: session.history });
+  const persist = () => saveSessionSoon({
+    id: sessionId,
+    cwd: session.cwd,
+    mode: session.mode,
+    model: session.model,
+    history: session.history,
+    checkpoints: session.checkpoints
+  });
+  let entry;
+  const ensureEntry = (baselineSha) => {
+    if (!entry) {
+      entry = { promptId, baselineSha: baselineSha ?? "", tools: [], createdAt: Date.now() };
+      session.checkpoints.push(entry);
+    }
+    return entry;
+  };
   let finalText = "";
   try {
     const stop = await runPrompt(
@@ -19519,14 +19859,28 @@ agent({ name: "koder-agent" }).onRequest("initialize", async () => ({
             ]
           });
           return res.outcome.outcome === "selected" && res.outcome.optionId === "allow";
+        },
+        onBaseline: (sha) => {
+          ensureEntry(sha);
+          persist();
+        },
+        onCheckpoint: (info) => {
+          const e = ensureEntry(null);
+          e.tools.push({ toolCallId: info.toolCallId, toolName: info.toolName, sha: info.sha, files: info.files });
+          void ctx.client.notify("koder/checkpoint", { sessionId, promptId, ...info });
+          persist();
         }
       },
+      promptId,
       abort.signal
     );
     if (session.mode === "review" && !abort.signal.aborted && /^#{1,3}\s*Plan\b/m.test(finalText)) {
       const planPath = savePlan(session.cwd, finalText);
       await ctx.client.notify("koder/plan_ready", { sessionId, path: planPath });
     }
+    void maybeCompact(session.cwd).then((r) => {
+      if (r.compacted) void ctx.client.notify("koder/checkpoint_compacted", { sessionId });
+    });
     return { stopReason: abort.signal.aborted ? "cancelled" : stop };
   } catch (err) {
     if (abort.signal.aborted) return { stopReason: "cancelled" };
@@ -19540,7 +19894,37 @@ Error: ${err?.message ?? err}` }
   } finally {
     if (session.pending === abort) session.pending = void 0;
   }
-}).onNotification("session/cancel", async (ctx) => {
+}).onRequest(
+  "koder/undo_file",
+  (v) => v,
+  async (ctx) => {
+    const session = sessions.get(ctx.params.sessionId);
+    if (!session) throw new Error(`unknown session ${ctx.params.sessionId}`);
+    const { path, force } = ctx.params;
+    let target;
+    for (const c of session.checkpoints) {
+      if (c.tools.some((t) => t.files.includes(path)) && (!target || c.createdAt > target.createdAt)) target = c;
+    }
+    if (!target) throw new Error(`no checkpoint found for ${path}`);
+    return undoFile(session.cwd, path, target.baselineSha, force);
+  }
+).onRequest(
+  "koder/undo_prompt",
+  (v) => v,
+  async (ctx) => {
+    const session = sessions.get(ctx.params.sessionId);
+    if (!session) throw new Error(`unknown session ${ctx.params.sessionId}`);
+    const { promptId: targetPromptId, force } = ctx.params;
+    const target = session.checkpoints.find((c) => c.promptId === targetPromptId);
+    if (!target) throw new Error(`no checkpoint found for prompt ${targetPromptId}`);
+    const files = [...new Set(target.tools.flatMap((t) => t.files))];
+    if (!force) {
+      const overlap = laterOverlap(session.checkpoints, targetPromptId);
+      if (Object.keys(overlap).length > 0) return { ok: false, overlap };
+    }
+    return undoPaths(session.cwd, files, target.baselineSha, force);
+  }
+).onNotification("session/cancel", async (ctx) => {
   sessions.get(ctx.params.sessionId)?.pending?.abort();
 }).connect(
   ndJsonStream(

@@ -258,7 +258,7 @@ async function searchWorkspaceFiles(q) {
 
 // ---------- webview view ----------
 // transcript events that get replayed when the webview is rebuilt
-const REPLAYABLE = new Set(["user", "chunk", "thought", "tool", "toolUpdate", "system", "modeChanged", "turnEnd"]);
+const REPLAYABLE = new Set(["user", "chunk", "thought", "tool", "toolUpdate", "system", "modeChanged", "turnEnd", "checkpoint"]);
 
 function chatsDir() {
   const dir = path.join(os.homedir(), ".koder", "chats");
@@ -395,6 +395,16 @@ class AgentViewProvider {
     this.turnInProgress = false; // set for the duration of a session/prompt turn — see sendPrompt(); the one guard
     // shared by the desktop composer and the phone's POST /control/send so the two can't race each other into two
     // concurrent session/prompt calls (docs/research/10-remote-control.md Phase B, race-handling item).
+
+    // ---------- prompt-checkpoints + undo (docs/research/11) ----------
+    // path (workspace-relative, same shape `koder/checkpoint` notifications
+    // use) -> { promptId, sha, toolCallId } for the MOST RECENT prompt that
+    // touched it — latest-wins, per doc 11 §3.3/§4.1. This is what the
+    // editor-title undo button's `koder.fileHasCheckpoint` context key and
+    // "undo this file" action read from; the chat panel's per-turn card gets
+    // its own file lists straight off the "checkpoint" transcript events
+    // (grouped by promptId), not from this map.
+    this.fileCheckpoints = new Map();
   }
 
   /** Snapshot handed to a freshly (re)connecting phone — see remote-server.js's GET /state. */
@@ -513,6 +523,10 @@ class AgentViewProvider {
         if (method === "koder/plan_saved") this.onPlanSaved(params.path);
         if (method === "koder/plan_ready") this.onPlanReady(params.path);
         if (method === "koder/usage") this.post({ type: "usage", ...params });
+        if (method === "koder/checkpoint") this.onCheckpoint(params);
+        if (method === "koder/checkpoint_compacted") {
+          this.post({ type: "system", text: "Older undo history was compacted to bound disk usage — very old turns may no longer be undoable." });
+        }
       },
       onRequest: async (method, params) => {
         if (method === "session/request_permission") return this.onPermissionRequest(params);
@@ -565,6 +579,41 @@ class AgentViewProvider {
         this.post({ type: "toolUpdate", id: u.toolCallId, status: u.status, output: extractToolOutputText(u) });
         break;
     }
+  }
+
+  /**
+   * `koder/checkpoint` notification (doc 11 §3.2) — fired once per
+   * successful mutating tool call. Feeds BOTH UI surfaces from the same
+   * data: the chat panel gets the raw event (grouped/rendered by promptId in
+   * panel.js); `fileCheckpoints` tracks, per path, only the LATEST prompt
+   * that touched it (doc 11 §4.1 — the editor button always means "undo
+   * what the most recent prompt did to this file").
+   */
+  onCheckpoint(params) {
+    this.post({ type: "checkpoint", promptId: params.promptId, toolCallId: params.toolCallId, toolName: params.toolName, sha: params.sha, files: params.files });
+    for (const f of params.files ?? []) {
+      this.fileCheckpoints.set(f, { promptId: params.promptId, sha: params.sha, toolCallId: params.toolCallId });
+    }
+    this.refreshFileHasCheckpointContext();
+  }
+
+  /** Rebuild `fileCheckpoints` from a loaded/replayed transcript's "checkpoint" events, latest-wins per path. */
+  rebuildFileCheckpoints() {
+    this.fileCheckpoints.clear();
+    for (const e of this.transcript) {
+      if (e.type !== "checkpoint") continue;
+      for (const f of e.files ?? []) {
+        this.fileCheckpoints.set(f, { promptId: e.promptId, sha: e.sha, toolCallId: e.toolCallId });
+      }
+    }
+    this.refreshFileHasCheckpointContext();
+  }
+
+  /** Recompute the `koder.fileHasCheckpoint` `when`-clause context key for whatever editor is currently active. */
+  refreshFileHasCheckpointContext() {
+    const editor = vscode.window.activeTextEditor;
+    const has = Boolean(editor && this.fileCheckpoints.has(toWorkspaceRelative(editor.document.uri.fsPath)));
+    vscode.commands.executeCommand("setContext", "koder.fileHasCheckpoint", has);
   }
 
   async onPlanReady(planPath) {
@@ -640,8 +689,13 @@ class AgentViewProvider {
     const displayText = text || (attachments.length ? attachments.map((a) => `@${a.path}`).join(" ") : "");
     if (!displayText) return;
     this.turnInProgress = true;
+    // doc 11 §1: minted client-side, before the request goes out, so it can
+    // be attached to this same optimistic "user" post — the client already
+    // knows it just sent one prompt and is receiving updates until turnEnd,
+    // so no round-trip is needed to associate the ID with this turn.
+    const promptId = "pr_" + crypto.randomUUID();
     try {
-      this.post({ type: "user", text: displayText });
+      this.post({ type: "user", text: displayText, promptId });
       if (!this.chatTitle) this.chatTitle = displayText.slice(0, 48);
       this.post({ type: "turnStart" });
       const blocks = attachments.map(buildFileBlock).filter(Boolean);
@@ -650,6 +704,11 @@ class AgentViewProvider {
         const res = await this.acp.request("session/prompt", {
           sessionId: this.sessionId,
           prompt: [{ type: "text", text: promptText }],
+          // `_meta` is the ACP spec's own extension-data bag — a bare
+          // top-level `promptId` field gets silently stripped by the
+          // runtime's built-in `session/prompt` schema validation (verified
+          // against the ACP SDK directly; see agent/src/server.ts).
+          _meta: { promptId },
         });
         this.post({ type: "turnEnd", stopReason: res.stopReason });
       } catch (err) {
@@ -658,6 +717,47 @@ class AgentViewProvider {
       }
     } finally {
       this.turnInProgress = false;
+    }
+  }
+
+  /**
+   * Editor-title undo (doc 11 §6): revert `relPath` to its state before the
+   * most recent prompt that touched it. Shared conflict-confirm flow — an
+   * editor-buffer dirty check first (client-side, catches the most visible
+   * case before even asking the runtime), then the shadow-git conflict check
+   * server-side (doc 11 §5), each with its own confirm-and-retry-with-force
+   * step. Returns `{ok, reverted}` / `{ok:false}` / `null` if the user
+   * cancelled at either step, or if there is nothing to undo.
+   */
+  async undoFileWithConfirm(relPath) {
+    if (!this.acp || !this.sessionId) return null;
+    if (!this.fileCheckpoints.has(relPath)) return null;
+
+    const doc = vscode.workspace.textDocuments.find((d) => toWorkspaceRelative(d.uri.fsPath) === relPath);
+    if (doc?.isDirty) {
+      const pick = await vscode.window.showWarningMessage(
+        "This file has unsaved changes in the editor. Undo will discard them.",
+        { modal: true },
+        "Discard and Undo",
+      );
+      if (pick !== "Discard and Undo") return null;
+    }
+
+    try {
+      let res = await this.acp.request("koder/undo_file", { sessionId: this.sessionId, path: relPath });
+      if (!res.ok && res.conflict) {
+        const pick = await vscode.window.showWarningMessage(
+          "This file has been edited since the agent last changed it. Undo will overwrite that edit.",
+          { modal: true },
+          "Overwrite and Undo",
+        );
+        if (pick !== "Overwrite and Undo") return null;
+        res = await this.acp.request("koder/undo_file", { sessionId: this.sessionId, path: relPath, force: true });
+      }
+      return res;
+    } catch (err) {
+      this.post({ type: "system", text: `undo failed: ${err.message}` });
+      return { ok: false };
     }
   }
 
@@ -781,6 +881,7 @@ class AgentViewProvider {
           this.chatTitle = j.title;
           this.mode = j.mode ?? "review";
           this.transcript = j.events ?? [];
+          this.rebuildFileCheckpoints();
           this.view?.webview.postMessage({ type: "replay", events: this.transcript });
           this.view?.webview.postMessage({ type: "modeChanged", mode: this.mode, auto: false });
           // these two bypass post() (they don't go through the transcript-push
@@ -841,6 +942,29 @@ class AgentViewProvider {
       case "openFeedbackLog":
         vscode.commands.executeCommand("koder.openFeedbackLog");
         break;
+      case "undoPrompt": {
+        // Chat-panel surface (doc 11 §7): "Undo all N files" under a turn's
+        // Files-changed card. Never a tool the model can call — dispatched
+        // only from this user-initiated webview message.
+        if (!this.acp || !this.sessionId) break;
+        try {
+          const res = await this.acp.request("koder/undo_prompt", {
+            sessionId: this.sessionId,
+            promptId: m.promptId,
+            force: Boolean(m.force),
+          });
+          if (!res.ok && (res.conflict || res.overlap)) {
+            // panel.js shows one shared confirm dialog for both cases (doc
+            // 11 §5/§4.3) and re-sends this same message with force: true.
+            this.view?.webview.postMessage({ type: "undoConflict", promptId: m.promptId, conflict: res.conflict, overlap: res.overlap });
+            break;
+          }
+          this.post({ type: "system", text: `Reverted ${res.reverted?.length ?? 0} file(s) from that turn.` });
+        } catch (err) {
+          this.post({ type: "system", text: `undo failed: ${err.message}` });
+        }
+        break;
+      }
       case "cancel":
         this.acp?.notify("session/cancel", { sessionId: this.sessionId });
         break;
@@ -956,6 +1080,8 @@ class AgentViewProvider {
     this.chatId = `chat-${Date.now()}`;
     this.chatTitle = null;
     this.mode = "review";
+    this.fileCheckpoints.clear();
+    this.refreshFileHasCheckpointContext();
     if (this.acp) {
       const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir();
       const s = await this.acp.request("session/new", { cwd, mcpServers: [] });
@@ -1185,6 +1311,21 @@ async function activate(context) {
       const doc = await vscode.workspace.openTextDocument(file);
       vscode.window.showTextDocument(doc);
     }),
+    // ---------- editor-title undo (doc 11 §6) ----------
+    vscode.commands.registerCommand("koder.undoFileChanges", async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) return;
+      const relPath = toWorkspaceRelative(editor.document.uri.fsPath);
+      const res = await provider.undoFileWithConfirm(relPath);
+      if (!res) return; // cancelled, or nothing to undo
+      if (!res.ok) {
+        provider.post({ type: "system", text: `Could not undo ${relPath}.` });
+        return;
+      }
+      // receipt shows in chat too, same pattern doc 11 §6 sketches
+      provider.post({ type: "system", text: `Reverted ${relPath}.` });
+    }),
+    vscode.window.onDidChangeActiveTextEditor(() => provider.refreshFileHasCheckpointContext()),
   );
 }
 

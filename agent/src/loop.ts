@@ -5,7 +5,7 @@
  * and system prompt are 100% ours.
  */
 import { logRoyalAudit, summarizeInput, summarizeText } from "./audit.js";
-import { checkpointBeforeMutation } from "./checkpoint.js";
+import { checkpointBaseline, checkpointBeforeMutation, commitAfterTool } from "./checkpoint.js";
 import { envBlock, loadRules, scrubSecrets } from "./context.js";
 import { loadConfig, resolveModel } from "./config.js";
 import { floorCheck, royalTamperCheck } from "./floor.js";
@@ -27,6 +27,22 @@ export interface LoopCallbacks {
   onUsage?(usage: { inputTokens: number; outputTokens: number; estimated: boolean }): void;
   /** Fired after every history mutation — the hook point for crash-resilient persistence. */
   onHistoryChanged?(): void;
+  /**
+   * Fired once per prompt, right after the baseline shadow-git commit lands
+   * (doc 11 §2.3) — before the first tool commit. `sha` is null if the
+   * workspace is over the large-repo guard or the commit otherwise failed;
+   * callers should still create a checkpoint record (with an empty
+   * baselineSha) so `onCheckpoint` below has somewhere to attach to.
+   */
+  onBaseline?(sha: string | null): void;
+  /**
+   * Fired once per successful non-royal mutating tool call, right after its
+   * own shadow-git commit lands (docs/research/11-prompt-checkpoints-undo.md
+   * §2.3/§3.2) — the hook point for the `koder/checkpoint` notification and
+   * for appending to `session.checkpoints`. Royal mode has its own separate
+   * (already-shipped) checkpoint path and does not fire this.
+   */
+  onCheckpoint?(info: { toolCallId: string; toolName: string; sha: string; files: string[] }): void;
 }
 
 export interface AgentSession {
@@ -134,6 +150,7 @@ export async function runPrompt(
   session: AgentSession,
   userText: string,
   cb: LoopCallbacks,
+  promptId: string,
   signal?: AbortSignal,
 ): Promise<"end_turn" | "max_turn_requests" | "cancelled"> {
   const cfg = loadConfig();
@@ -147,6 +164,11 @@ export async function runPrompt(
   const userMessageIndex = session.history.length - 1;
   session.editFails ??= new Map();
   cb.onHistoryChanged?.();
+
+  // doc 11 §2.3: baseline commit fires once per PROMPT (not per tool call, not
+  // per outer iteration — a prompt can span several model round-trips), right
+  // before the first non-royal mutating tool actually runs.
+  let baselineTaken = false;
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     if (signal?.aborted) return "cancelled";
@@ -264,6 +286,17 @@ export async function runPrompt(
         continue;
       }
 
+      // doc 11 §2.3: baseline commit, once per prompt, right before the FIRST
+      // non-royal mutating tool actually runs (captures whatever the worktree
+      // looks like at that moment, including any out-of-band manual edit).
+      // Royal mode has its own separate before-mutation checkpoint above and
+      // never takes this path.
+      if (!isRoyal && spec.dangerous && !baselineTaken) {
+        const bl = await checkpointBaseline(session.cwd, promptId);
+        cb.onBaseline?.(bl.sha);
+        baselineTaken = true;
+      }
+
       // loop detection: same tool + same input called twice in a row
       const sig = `${tc.name}:${JSON.stringify(tc.input ?? {})}`;
       if (sig === session.lastToolSig) {
@@ -299,6 +332,15 @@ export async function runPrompt(
         const path = (tc.input as any)?.path;
         if (tc.name === "edit_file") session.editFails!.delete(path); // success clears the counter
         if (tc.name === "read_file" && path) session.editFails!.delete(path); // re-reading resets it too
+
+        // doc 11 §2.3: tool commit — one shadow-git commit per successful
+        // non-royal mutating tool call, immediately notifiable with a real
+        // SHA (unlike Royal's before-mutation-only commit above). `path` is
+        // only ever set for write_file/edit_file — bash stages the full tree.
+        if (!isRoyal && spec.dangerous) {
+          const cp = await commitAfterTool(session.cwd, promptId, tc.id, tc.name, path);
+          if (cp.sha) cb.onCheckpoint?.({ toolCallId: tc.id, toolName: tc.name, sha: cp.sha, files: cp.files });
+        }
 
         if (session.toolRepeatCount === 2) {
           output += "\n[note: identical call repeated — the result has not changed; try a different approach]";

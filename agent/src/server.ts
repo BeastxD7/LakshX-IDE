@@ -8,13 +8,37 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
+import { maybeCompact, undoFile, undoPaths } from "./checkpoint.js";
 import { availableProviders, loadConfig } from "./config.js";
 import { runPrompt, toolTitle, type AgentMode, type AgentSession } from "./loop.js";
 import { probeProvider } from "./providers/validate.js";
-import { loadSessionFile, pruneSessions, saveSessionSoon } from "./store.js";
+import { loadSessionFile, pruneSessions, saveSessionSoon, type PromptCheckpoint } from "./store.js";
 
 interface Session extends AgentSession {
   pending?: AbortController;
+  checkpoints: PromptCheckpoint[];
+}
+
+/**
+ * doc 11 §4.3: does any prompt LATER than `promptId` also touch a file
+ * `promptId` touched? Non-empty result = undoing `promptId` would silently
+ * discard those later changes too — surfaced so the client can warn before
+ * proceeding, same shape as the manual-edit conflict (§5).
+ */
+function laterOverlap(checkpoints: PromptCheckpoint[], promptId: string): Record<string, string[]> {
+  const target = checkpoints.find((c) => c.promptId === promptId);
+  if (!target) return {};
+  const targetFiles = new Set(target.tools.flatMap((t) => t.files));
+  const overlaps: Record<string, string[]> = {};
+  for (const c of checkpoints) {
+    if (c.createdAt <= target.createdAt) continue;
+    for (const t of c.tools) {
+      for (const f of t.files) {
+        if (targetFiles.has(f)) (overlaps[f] ??= []).push(c.promptId);
+      }
+    }
+  }
+  return overlaps;
 }
 
 const sessions = new Map<string, Session>();
@@ -53,7 +77,7 @@ acp
   .onRequest("authenticate", async () => ({}))
   .onRequest("session/new", async (ctx) => {
     const sessionId = randomUUID();
-    sessions.set(sessionId, { cwd: ctx.params.cwd, history: [], mode: "review" });
+    sessions.set(sessionId, { cwd: ctx.params.cwd, history: [], mode: "review", checkpoints: [] });
     return {
       sessionId,
       modes: { currentModeId: "review", availableModes: MODES },
@@ -69,6 +93,7 @@ acp
       mode: saved.mode,
       model: saved.model,
       history: saved.history,
+      checkpoints: saved.checkpoints ?? [],
     });
 
     // ACP contract: replay the conversation via session/update before returning.
@@ -139,6 +164,20 @@ acp
     const abort = new AbortController();
     session.pending = abort;
 
+    // doc 11 §1: Koder's own client mints promptId client-side and attaches
+    // it via `_meta` — the ACP SDK's own agent-side request registration
+    // auto-validates "session/prompt" against its built-in `zPromptRequest`
+    // schema (sessionId/prompt/_meta only) and SILENTLY STRIPS any other
+    // top-level field before this handler ever sees `ctx.params`, so a bare
+    // `promptId` field (as an early draft of this doc sketched) never
+    // arrives no matter what the client sends. `_meta` is the ACP spec's own
+    // sanctioned extension-data bag for exactly this case — verified against
+    // the SDK's zod schema (`_meta: z.record(z.string(), z.unknown())`)
+    // before relying on it. Any other ACP client (Zed, JetBrains) that
+    // doesn't send one still works — checkpointing just isn't
+    // client-correlatable for that turn.
+    const promptId: string = (ctx.params as any)?._meta?.promptId ?? randomUUID();
+
     const text = prompt
       .filter((b: any) => b.type === "text")
       .map((b: any) => b.text)
@@ -148,7 +187,26 @@ acp
       ctx.client.notify(acp.methods.client.session.update, { sessionId, update });
 
     const persist = () =>
-      saveSessionSoon({ id: sessionId, cwd: session.cwd, mode: session.mode, model: session.model, history: session.history });
+      saveSessionSoon({
+        id: sessionId,
+        cwd: session.cwd,
+        mode: session.mode,
+        model: session.model,
+        history: session.history,
+        checkpoints: session.checkpoints,
+      });
+
+    // The one PromptCheckpoint record this turn builds up — created lazily
+    // on the first baseline commit, appended to by every subsequent tool
+    // commit. Both onBaseline/onCheckpoint close over this same reference.
+    let entry: PromptCheckpoint | undefined;
+    const ensureEntry = (baselineSha: string | null): PromptCheckpoint => {
+      if (!entry) {
+        entry = { promptId, baselineSha: baselineSha ?? "", tools: [], createdAt: Date.now() };
+        session.checkpoints.push(entry);
+      }
+      return entry;
+    };
 
     let finalText = "";
     try {
@@ -191,7 +249,18 @@ acp
             });
             return res.outcome.outcome === "selected" && res.outcome.optionId === "allow";
           },
+          onBaseline: (sha) => {
+            ensureEntry(sha);
+            persist();
+          },
+          onCheckpoint: (info) => {
+            const e = ensureEntry(null);
+            e.tools.push({ toolCallId: info.toolCallId, toolName: info.toolName, sha: info.sha, files: info.files });
+            void ctx.client.notify("koder/checkpoint", { sessionId, promptId, ...info });
+            persist();
+          },
         },
+        promptId,
         abort.signal,
       );
 
@@ -207,6 +276,14 @@ acp
         await ctx.client.notify("koder/plan_ready", { sessionId, path: planPath });
       }
 
+      // doc 11 §2.6: opportunistic, size-triggered only (250MB) — never
+      // blocks the response; fires a one-off notice the client renders as a
+      // system transcript line ("older undo history was compacted..."),
+      // never silently.
+      void maybeCompact(session.cwd).then((r) => {
+        if (r.compacted) void ctx.client.notify("koder/checkpoint_compacted", { sessionId });
+      });
+
       return { stopReason: abort.signal.aborted ? "cancelled" : stop };
     } catch (err: any) {
       if (abort.signal.aborted) return { stopReason: "cancelled" };
@@ -219,6 +296,44 @@ acp
       if (session.pending === abort) session.pending = undefined;
     }
   })
+  // Koder extension: undo one file to its state before the most recent
+  // prompt that touched it (doc 11 §3.2/§4.1) — user-initiated only, never a
+  // tool the model can call; available in every mode, including review.
+  .onRequest(
+    "koder/undo_file",
+    (v: unknown) => v as { sessionId: string; path: string; force?: boolean },
+    async (ctx) => {
+      const session = sessions.get(ctx.params.sessionId);
+      if (!session) throw new Error(`unknown session ${ctx.params.sessionId}`);
+      const { path, force } = ctx.params;
+      let target: PromptCheckpoint | undefined;
+      for (const c of session.checkpoints) {
+        if (c.tools.some((t) => t.files.includes(path)) && (!target || c.createdAt > target.createdAt)) target = c;
+      }
+      if (!target) throw new Error(`no checkpoint found for ${path}`);
+      return undoFile(session.cwd, path, target.baselineSha, force);
+    },
+  )
+  // Koder extension: undo every file a specific prompt touched, atomically,
+  // back to that prompt's baseline (doc 11 §3.2/§4.2), warning first if a
+  // later prompt also touched one of those files (§4.3).
+  .onRequest(
+    "koder/undo_prompt",
+    (v: unknown) => v as { sessionId: string; promptId: string; force?: boolean },
+    async (ctx) => {
+      const session = sessions.get(ctx.params.sessionId);
+      if (!session) throw new Error(`unknown session ${ctx.params.sessionId}`);
+      const { promptId: targetPromptId, force } = ctx.params;
+      const target = session.checkpoints.find((c) => c.promptId === targetPromptId);
+      if (!target) throw new Error(`no checkpoint found for prompt ${targetPromptId}`);
+      const files = [...new Set(target.tools.flatMap((t) => t.files))];
+      if (!force) {
+        const overlap = laterOverlap(session.checkpoints, targetPromptId);
+        if (Object.keys(overlap).length > 0) return { ok: false, overlap };
+      }
+      return undoPaths(session.cwd, files, target.baselineSha, force);
+    },
+  )
   .onNotification("session/cancel", async (ctx) => {
     sessions.get(ctx.params.sessionId)?.pending?.abort();
   })

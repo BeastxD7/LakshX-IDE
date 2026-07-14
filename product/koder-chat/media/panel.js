@@ -147,6 +147,68 @@ function addTool(t) {
   scrollBottom();
 }
 
+// ---------- prompt checkpoints + "Files changed" undo (docs/research/11 §7) ----------
+// One card per promptId, accumulated live as `koder/checkpoint` events arrive
+// (not batched to turnEnd — a long multi-tool turn shows its file list
+// growing in real time) and identically on replay (same accumulation logic,
+// just fed the whole transcript at once instead of live).
+const checkpointCards = new Map(); // promptId -> { el, files: Set<string> }
+
+function applyCheckpoint(m) {
+  let card = checkpointCards.get(m.promptId);
+  if (!card) {
+    const el = document.createElement("div");
+    el.className = "checkpoint";
+    messagesEl.appendChild(el);
+    card = { el, files: new Set() };
+    checkpointCards.set(m.promptId, card);
+  }
+  for (const f of m.files ?? []) card.files.add(f);
+  renderCheckpointCard(m.promptId, card);
+  scrollBottom();
+}
+
+function renderCheckpointCard(promptId, card) {
+  const files = [...card.files];
+  const n = files.length;
+  card.el.innerHTML = `
+    <div class="cp-head">Files changed (${n})</div>
+    <div class="cp-files">${files.map(() => `<div class="cp-file"><span class="cp-path"></span></div>`).join("")}</div>
+    <button class="cp-undo-all">Undo all ${n} file${n === 1 ? "" : "s"}</button>
+    <div class="cp-confirm" hidden></div>`;
+  [...card.el.querySelectorAll(".cp-path")].forEach((el, i) => (el.textContent = files[i]));
+  card.el.querySelector(".cp-undo-all").addEventListener("click", () => requestUndoPrompt(promptId, card));
+}
+
+/** Shared confirm UI for both a manual-edit conflict (§5) and a cross-prompt overlap warning (§4.3) — same shape, different copy. */
+function showUndoConfirm(card, message, onConfirm) {
+  const box = card.el.querySelector(".cp-confirm");
+  box.hidden = false;
+  box.innerHTML = `<div class="cp-confirm-msg"></div><div class="cp-confirm-actions">
+    <button class="deny cp-cancel">Cancel</button><button class="allow cp-force">Overwrite and Undo</button></div>`;
+  box.querySelector(".cp-confirm-msg").textContent = message;
+  box.querySelector(".cp-cancel").addEventListener("click", () => { box.hidden = true; box.innerHTML = ""; });
+  box.querySelector(".cp-force").addEventListener("click", () => {
+    box.hidden = true;
+    box.innerHTML = "";
+    onConfirm();
+  });
+  scrollBottom();
+}
+
+function requestUndoPrompt(promptId, force) {
+  vscode.postMessage({ type: "undoPrompt", promptId, force: force === true });
+}
+
+function handleUndoConflict(m) {
+  const card = checkpointCards.get(m.promptId);
+  if (!card) return;
+  const message = m.overlap
+    ? `A later prompt also changed ${Object.keys(m.overlap).join(", ")} after this one. Undoing will discard those changes too. Continue?`
+    : `${m.conflict?.paths?.join(", ") || "One or more files"} have been edited since the agent last changed them. Undo will overwrite that edit. Continue?`;
+  showUndoConfirm(card, message, () => requestUndoPrompt(m.promptId, true));
+}
+
 function setBusy(b) {
   busy = b;
   sendBtn.disabled = b;
@@ -557,6 +619,7 @@ function applyEvent(m, replaying) {
       setModeUI(m.mode);
       if (m.auto) addMsg("system", `Plan complete — switched to ${m.mode} mode.`);
       break;
+    case "checkpoint": applyCheckpoint(m); break;
     case "turnEnd":
       if (replaying) {
         flushBulk();
@@ -690,6 +753,7 @@ window.addEventListener("message", (e) => {
     case "replay":
       messagesEl.innerHTML = "";
       tools.clear();
+      checkpointCards.clear();
       bulkRaw = null;
       turnHasText = false;
       lastAgentEl = null;
@@ -715,6 +779,8 @@ window.addEventListener("message", (e) => {
       break;
     case "toolUpdate": applyEvent(m, false); break;
     case "modeChanged": applyEvent(m, false); break;
+    case "checkpoint": applyEvent(m, false); break;
+    case "undoConflict": handleUndoConflict(m); break;
     case "permission": {
       currentPermissionId = m.id;
       permissionBar.hidden = false;
@@ -781,6 +847,7 @@ window.addEventListener("message", (e) => {
     case "clear":
       messagesEl.innerHTML = "";
       tools.clear();
+      checkpointCards.clear();
       endStream();
       setBusy(false);
       setModeUI("review");
