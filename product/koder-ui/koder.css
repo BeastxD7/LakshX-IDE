@@ -44,6 +44,11 @@
 }
 .monaco-workbench .sidebar .monaco-list .monaco-list-rows,
 .monaco-workbench .quick-input-list .monaco-list-rows {
+  /* upstream sets width: 100% (not auto) with default content-box sizing on
+     this element, so adding padding here without border-box makes it 12px
+     wider than its container — clipping row content (icons, git-status
+     badges) against the sidebar's right edge. */
+  box-sizing: border-box;
   padding: 0 6px;
 }
 
