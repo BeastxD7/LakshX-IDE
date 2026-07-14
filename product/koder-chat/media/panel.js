@@ -12,6 +12,9 @@ const composerEl = document.getElementById("composer");
 const attachRow = document.getElementById("attachRow");
 const attachBtn = document.getElementById("attachBtn");
 const mentionPopup = document.getElementById("mentionPopup");
+const checkpointBarEl = document.getElementById("checkpointBar");
+const cpbarHead = document.getElementById("cpbarHead");
+const cpbarBody = document.getElementById("cpbarBody");
 
 let streamEl = null;
 let streamRaw = "";
@@ -146,13 +149,27 @@ function addTool(t) {
 }
 
 // ---------- prompt checkpoints + "Files changed" undo (docs/research/11 §7) ----------
-// One card per promptId, accumulated live as `koder/checkpoint` events arrive
-// (not batched to turnEnd — a long multi-tool turn shows its file list
-// growing in real time) and identically on replay (same accumulation logic,
-// just fed the whole transcript at once instead of live).
+// Two surfaces, same underlying "checkpoint"/"checkpointReverted" event
+// stream, same undo primitives:
+//  - `checkpointCards`: one card per promptId, inline in the transcript,
+//    accumulated live as `koder/checkpoint` events arrive (not batched to
+//    turnEnd — a long multi-tool turn shows its file list growing in real
+//    time) and identically on replay. Good for "what did THIS turn touch."
+//  - `sessionFiles`: a single composer-anchored summary bar aggregating
+//    every file changed so far THIS SESSION (latest-touching-promptId per
+//    path), collapsed by default. Added because the per-turn card scrolls
+//    out of view as the conversation continues — this is reachable without
+//    scrolling back, which was the explicit ask. Kept the per-turn card too
+//    rather than replacing it: the two answer different questions ("just
+//    this turn" vs "everything so far") and share all their rendering/undo
+//    logic, so the marginal cost of keeping both is low.
+// Neither surface is ever shown with zero files — a card/bar with nothing
+// to undo is worse than no card/bar at all.
 const checkpointCards = new Map(); // promptId -> { el, files: Set<string> }
+const sessionFiles = new Map(); // path -> { promptId } — latest-wins
 
 function applyCheckpoint(m) {
+  if (!m.files?.length) return; // never render a zero-file card (loop.ts already guarantees this, guarded again here)
   let card = checkpointCards.get(m.promptId);
   if (!card) {
     const el = document.createElement("div");
@@ -161,9 +178,36 @@ function applyCheckpoint(m) {
     card = { el, files: new Set() };
     checkpointCards.set(m.promptId, card);
   }
-  for (const f of m.files ?? []) card.files.add(f);
+  for (const f of m.files) {
+    card.files.add(f);
+    sessionFiles.set(f, { promptId: m.promptId });
+  }
   renderCheckpointCard(m.promptId, card);
+  renderCheckpointBar();
   scrollBottom();
+}
+
+/** "an undo just succeeded" — drop the reverted paths from both surfaces, removing/hiding whatever becomes empty. Fed live and on replay (see applyEvent). */
+function applyRevert(paths) {
+  if (!paths?.length) return;
+  for (const [promptId, card] of [...checkpointCards.entries()]) {
+    let changed = false;
+    for (const p of paths) changed = card.files.delete(p) || changed;
+    if (!changed) continue;
+    if (card.files.size === 0) {
+      card.el.remove();
+      checkpointCards.delete(promptId);
+    } else {
+      renderCheckpointCard(promptId, card);
+    }
+  }
+  let sessionChanged = false;
+  for (const p of paths) sessionChanged = sessionFiles.delete(p) || sessionChanged;
+  if (sessionChanged) renderCheckpointBar();
+}
+
+function openCheckpointFile(promptId, path) {
+  vscode.postMessage({ type: "openCheckpointFile", promptId, path });
 }
 
 function renderCheckpointCard(promptId, card) {
@@ -171,14 +215,16 @@ function renderCheckpointCard(promptId, card) {
   const n = files.length;
   card.el.innerHTML = `
     <div class="cp-head">Files changed (${n})</div>
-    <div class="cp-files">${files.map(() => `<div class="cp-file"><span class="cp-path"></span><button class="cp-file-undo" title="Undo this file">Undo</button></div>`).join("")}</div>
+    <div class="cp-files">${files.map(() => `<div class="cp-file"><span class="cp-path" role="button" tabindex="0" title="Open diff"></span><button class="cp-file-undo" title="Undo this file">Undo</button></div>`).join("")}</div>
     <button class="cp-undo-all">Undo all ${n} file${n === 1 ? "" : "s"}</button>
     <div class="cp-confirm" hidden></div>`;
   [...card.el.querySelectorAll(".cp-file")].forEach((el, i) => {
-    el.querySelector(".cp-path").textContent = files[i];
+    const p = el.querySelector(".cp-path");
+    p.textContent = files[i];
+    p.addEventListener("click", () => openCheckpointFile(promptId, files[i]));
     el.querySelector(".cp-file-undo").addEventListener("click", () => requestUndoFile(promptId, files[i]));
   });
-  card.el.querySelector(".cp-undo-all").addEventListener("click", () => requestUndoPrompt(promptId, card));
+  card.el.querySelector(".cp-undo-all").addEventListener("click", () => requestUndoPrompt(promptId));
 }
 
 /** Shared confirm UI for both a manual-edit conflict (§5) and a cross-prompt overlap warning (§4.3) — same shape, different copy. */
@@ -194,7 +240,7 @@ function showUndoConfirm(card, message, onConfirm) {
     box.innerHTML = "";
     onConfirm();
   });
-  scrollBottom();
+  card.el.scrollIntoView({ block: "nearest" }); // the click that triggered this may have come from the composer bar, off in a different part of the transcript
 }
 
 function requestUndoPrompt(promptId, force) {
@@ -217,6 +263,54 @@ function handleUndoConflict(m) {
     m.path ? requestUndoFile(m.promptId, m.path, true) : requestUndoPrompt(m.promptId, true),
   );
 }
+
+// ---------- composer-anchored "files changed this session" summary bar ----------
+// Collapsed by default ("Files changed this session (N)"); expands to a flat,
+// latest-wins-per-path file list with the same per-file Undo + Open-diff
+// actions as the per-turn card. "Undo all" here deliberately does N
+// sequential per-file undos (not one atomic `undo_prompt`) rather than
+// grouping by promptId: a per-file undo's only failure mode is the
+// manual-edit conflict, which reuses the per-turn card's existing confirm UI
+// (that card is guaranteed to exist whenever a path is listed here, since
+// both maps are populated by the exact same checkpoint events) — grouping by
+// prompt would additionally risk the cross-prompt "overlap" conflict, which
+// has no confirm surface of its own in this bar. Trading a small amount of
+// atomicity for not needing a second conflict-UI is the right call here.
+let cpbarExpanded = false;
+
+function renderCheckpointBar() {
+  const n = sessionFiles.size;
+  checkpointBarEl.hidden = n === 0; // never show a "0 files" bar
+  if (n === 0) {
+    cpbarBody.innerHTML = "";
+    return;
+  }
+  cpbarHead.innerHTML = `<span class="cpbar-label">Files changed this session (${n})</span><span class="cpbar-chevron">${cpbarExpanded ? "▾" : "▸"}</span>`;
+  cpbarBody.hidden = !cpbarExpanded;
+  if (!cpbarExpanded) {
+    cpbarBody.innerHTML = "";
+    return;
+  }
+  const entries = [...sessionFiles.entries()];
+  cpbarBody.innerHTML = `
+    <div class="cpbar-files">${entries.map(() => `<div class="cpbar-file"><span class="cpbar-path" role="button" tabindex="0" title="Open diff"></span><button class="cpbar-file-undo" title="Undo this file">Undo</button></div>`).join("")}</div>
+    <button class="cpbar-undo-all">Undo all ${n} file${n === 1 ? "" : "s"}</button>`;
+  [...cpbarBody.querySelectorAll(".cpbar-file")].forEach((el, i) => {
+    const [filePath, info] = entries[i];
+    const p = el.querySelector(".cpbar-path");
+    p.textContent = filePath;
+    p.addEventListener("click", () => openCheckpointFile(info.promptId, filePath));
+    el.querySelector(".cpbar-file-undo").addEventListener("click", () => requestUndoFile(info.promptId, filePath));
+  });
+  cpbarBody.querySelector(".cpbar-undo-all").addEventListener("click", () => {
+    for (const [filePath, info] of entries) requestUndoFile(info.promptId, filePath);
+  });
+}
+
+cpbarHead.addEventListener("click", () => {
+  cpbarExpanded = !cpbarExpanded;
+  renderCheckpointBar();
+});
 
 function setBusy(b) {
   busy = b;
@@ -634,6 +728,7 @@ function applyEvent(m, replaying) {
       if (m.auto) addMsg("system", `Plan complete — switched to ${m.mode} mode.`);
       break;
     case "checkpoint": applyCheckpoint(m); break;
+    case "checkpointReverted": applyRevert(m.paths); break;
     case "turnEnd":
       if (replaying) {
         flushBulk();
@@ -768,6 +863,9 @@ window.addEventListener("message", (e) => {
       messagesEl.innerHTML = "";
       tools.clear();
       checkpointCards.clear();
+      sessionFiles.clear();
+      cpbarExpanded = false;
+      renderCheckpointBar(); // hides the bar before replay repopulates it
       bulkRaw = null;
       turnHasText = false;
       lastAgentEl = null;
@@ -794,6 +892,7 @@ window.addEventListener("message", (e) => {
     case "toolUpdate": applyEvent(m, false); break;
     case "modeChanged": applyEvent(m, false); break;
     case "checkpoint": applyEvent(m, false); break;
+    case "checkpointReverted": applyEvent(m, false); break;
     case "undoConflict": handleUndoConflict(m); break;
     case "permission": {
       currentPermissionId = m.id;
@@ -862,6 +961,9 @@ window.addEventListener("message", (e) => {
       messagesEl.innerHTML = "";
       tools.clear();
       checkpointCards.clear();
+      sessionFiles.clear();
+      cpbarExpanded = false;
+      renderCheckpointBar();
       endStream();
       setBusy(false);
       setModeUI("review");

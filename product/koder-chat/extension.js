@@ -177,6 +177,67 @@ function toWorkspaceRelative(absPath) {
   return root && absPath.startsWith(root) ? path.relative(root, absPath).split(path.sep).join("/") : absPath;
 }
 
+function toAbsoluteUri(relPath) {
+  const root = workspaceRoot() ?? "";
+  return vscode.Uri.file(path.join(root, relPath));
+}
+
+/**
+ * Read-only virtual-document backing for "open diff" (docs/research/11 §7,
+ * follow-up ask: clicking a changed file should show what changed, not just
+ * open it blind). Materializes a file's shadow-git content at a checkpoint's
+ * baseline as an in-memory `koder-checkpoint:` document, so `vscode.diff`
+ * can compare it against the real, live file on disk — no temp files, no
+ * git access needed client-side (only the agent process touches the
+ * shadow-git plumbing; content is fetched over ACP, see
+ * `koder/checkpoint_file_before` in server.ts).
+ */
+class CheckpointContentProvider {
+  constructor() {
+    this.store = new Map(); // uri string -> content
+    this._onDidChange = new vscode.EventEmitter();
+    this.onDidChange = this._onDidChange.event;
+  }
+  /** A fresh nonce per call so VS Code never serves stale cached content for the same path across repeated diffs. */
+  uriFor(relPath, content) {
+    const uri = vscode.Uri.parse(`koder-checkpoint:/${relPath}`).with({ query: `t=${Date.now()}` });
+    this.store.set(uri.toString(), content);
+    return uri;
+  }
+  provideTextDocumentContent(uri) {
+    return this.store.get(uri.toString()) ?? "";
+  }
+}
+
+/**
+ * Editor-side signal (doc 11 §8 Phase C stretch, shipped now — cheap and
+ * well-isolated): a small badge in the file tree/tabs for any file with an
+ * available checkpoint, visible before the file is even opened. Reads
+ * straight off `AgentViewProvider.fileCheckpoints`, the same map the
+ * editor-title command's `koder.fileHasCheckpoint` context key already uses.
+ */
+class CheckpointDecorationProvider {
+  constructor(provider) {
+    this.provider = provider;
+    this._onDidChange = new vscode.EventEmitter();
+    this.onDidChangeFileDecorations = this._onDidChange.event;
+  }
+  refresh(uris) {
+    this._onDidChange.fire(uris);
+  }
+  provideFileDecoration(uri) {
+    if (uri.scheme !== "file") return undefined;
+    if (!this.provider.fileCheckpoints.has(toWorkspaceRelative(uri.fsPath))) return undefined;
+    return {
+      badge: "●",
+      color: new vscode.ThemeColor("gitDecoration.modifiedResourceForeground"),
+      tooltip: "Changed by Koder this session — undo from the editor title bar or the chat panel",
+    };
+  }
+}
+
+const checkpointContentProvider = new CheckpointContentProvider();
+
 /**
  * Resolve a chip's path to an absolute, readable path. Relative paths are
  * joined to the workspace root and rejected if they'd escape it (mirrors
@@ -258,7 +319,11 @@ async function searchWorkspaceFiles(q) {
 
 // ---------- webview view ----------
 // transcript events that get replayed when the webview is rebuilt
-const REPLAYABLE = new Set(["user", "chunk", "thought", "tool", "toolUpdate", "system", "modeChanged", "turnEnd", "checkpoint"]);
+// "checkpointReverted" is replayed the same event-sourced way "checkpoint" is
+// (see notifyReverted below) so a chat reload nets out to the same "does
+// this file currently have an undoable agent change" state live sessions
+// converge to, instead of resurrecting already-reverted files after reload.
+const REPLAYABLE = new Set(["user", "chunk", "thought", "tool", "toolUpdate", "system", "modeChanged", "turnEnd", "checkpoint", "checkpointReverted"]);
 
 function chatsDir() {
   const dir = path.join(os.homedir(), ".koder", "chats");
@@ -590,23 +655,52 @@ class AgentViewProvider {
    * what the most recent prompt did to this file").
    */
   onCheckpoint(params) {
+    // Never posted with an empty files list — loop.ts only fires
+    // `onCheckpoint` when a tool call actually changed something (see its
+    // doc comment), but guard here too since this is the one place that
+    // could resurrect a stale "Files changed (0)" state if that upstream
+    // invariant ever slipped.
+    if (!params.files?.length) return;
     this.post({ type: "checkpoint", promptId: params.promptId, toolCallId: params.toolCallId, toolName: params.toolName, sha: params.sha, files: params.files });
-    for (const f of params.files ?? []) {
+    for (const f of params.files) {
       this.fileCheckpoints.set(f, { promptId: params.promptId, sha: params.sha, toolCallId: params.toolCallId });
     }
     this.refreshFileHasCheckpointContext();
+    this.checkpointDecorationProvider?.refresh(params.files.map(toAbsoluteUri));
   }
 
-  /** Rebuild `fileCheckpoints` from a loaded/replayed transcript's "checkpoint" events, latest-wins per path. */
+  /**
+   * Fan-out for "an undo just succeeded" — called from every place a
+   * `koder/undo_file`/`koder/undo_prompt` request (chat-panel buttons OR the
+   * editor-title command) returns `ok:true`. Removes the reverted paths from
+   * every piece of state that tracks "this file currently has an
+   * agent-made change to undo," so all three surfaces (editor-title button +
+   * badge, chat-panel per-turn card, composer-anchored summary bar) drop
+   * back out of view together — zero remaining changes means zero undo UI,
+   * not a stale, still-visible-but-empty card left behind on any surface.
+   * Persisted as a REPLAYABLE event so a chat reload converges to the same
+   * state a live session would.
+   */
+  notifyReverted(paths) {
+    if (!paths?.length) return;
+    for (const p of paths) this.fileCheckpoints.delete(p);
+    this.refreshFileHasCheckpointContext();
+    this.checkpointDecorationProvider?.refresh(paths.map(toAbsoluteUri));
+    this.post({ type: "checkpointReverted", paths });
+  }
+
+  /** Rebuild `fileCheckpoints` from a loaded/replayed transcript's "checkpoint"/"checkpointReverted" events, in order, latest-wins per path. */
   rebuildFileCheckpoints() {
     this.fileCheckpoints.clear();
     for (const e of this.transcript) {
-      if (e.type !== "checkpoint") continue;
-      for (const f of e.files ?? []) {
-        this.fileCheckpoints.set(f, { promptId: e.promptId, sha: e.sha, toolCallId: e.toolCallId });
+      if (e.type === "checkpoint") {
+        for (const f of e.files ?? []) this.fileCheckpoints.set(f, { promptId: e.promptId, sha: e.sha, toolCallId: e.toolCallId });
+      } else if (e.type === "checkpointReverted") {
+        for (const f of e.paths ?? []) this.fileCheckpoints.delete(f);
       }
     }
     this.refreshFileHasCheckpointContext();
+    this.checkpointDecorationProvider?.refresh(undefined);
   }
 
   /** Recompute the `koder.fileHasCheckpoint` `when`-clause context key for whatever editor is currently active. */
@@ -614,6 +708,44 @@ class AgentViewProvider {
     const editor = vscode.window.activeTextEditor;
     const has = Boolean(editor && this.fileCheckpoints.has(toWorkspaceRelative(editor.document.uri.fsPath)));
     vscode.commands.executeCommand("setContext", "koder.fileHasCheckpoint", has);
+  }
+
+  /**
+   * "Open diff" (follow-up ask: clicking a changed file should show what
+   * changed, not just open it blind). Fetches the pre-turn content from the
+   * agent process (only it touches the shadow-git plumbing) and hands it to
+   * VS Code's built-in diff editor against the live file on disk.
+   */
+  async openCheckpointDiff(promptId, relPath) {
+    if (!this.acp || !this.sessionId) return;
+    const rightUri = toAbsoluteUri(relPath);
+    let content = null;
+    try {
+      const res = await this.acp.request("koder/checkpoint_file_before", { sessionId: this.sessionId, promptId, path: relPath });
+      content = res?.content ?? null;
+    } catch (err) {
+      this.post({ type: "system", text: `Could not load the pre-change version of ${relPath} (${err.message}) — opening the file instead.` });
+      try {
+        await vscode.window.showTextDocument(rightUri);
+      } catch (openErr) {
+        this.post({ type: "system", text: `Could not open ${relPath}: ${openErr.message}` });
+      }
+      return;
+    }
+    const leftUri = checkpointContentProvider.uriFor(relPath, content ?? "");
+    const title = `${path.basename(relPath)} (before this turn ↔ working tree)`;
+    try {
+      await vscode.commands.executeCommand("vscode.diff", leftUri, rightUri, title);
+    } catch (err) {
+      // e.g. the live file was deleted since (a later bash `rm`, or the
+      // agent removed it) — vscode.diff can't open a nonexistent right side.
+      // Degrade to just the "before" content read-only rather than a dead click.
+      try {
+        await vscode.workspace.openTextDocument(leftUri).then((doc) => vscode.window.showTextDocument(doc));
+      } catch {
+        this.post({ type: "system", text: `Could not open a diff for ${relPath}: ${err.message}` });
+      }
+    }
   }
 
   async onPlanReady(planPath) {
@@ -959,6 +1091,7 @@ class AgentViewProvider {
             this.view?.webview.postMessage({ type: "undoConflict", promptId: m.promptId, conflict: res.conflict, overlap: res.overlap });
             break;
           }
+          this.notifyReverted(res.reverted);
           this.post({ type: "system", text: `Reverted ${res.reverted?.length ?? 0} file(s) from that turn.` });
         } catch (err) {
           this.post({ type: "system", text: `undo failed: ${err.message}` });
@@ -983,12 +1116,16 @@ class AgentViewProvider {
             this.view?.webview.postMessage({ type: "undoConflict", promptId: m.promptId, path: m.path, conflict: res.conflict });
             break;
           }
+          this.notifyReverted(res.reverted);
           this.post({ type: "system", text: `Reverted ${m.path}.` });
         } catch (err) {
           this.post({ type: "system", text: `undo failed: ${err.message}` });
         }
         break;
       }
+      case "openCheckpointFile":
+        this.openCheckpointDiff(m.promptId, m.path);
+        break;
       case "cancel":
         this.acp?.notify("session/cancel", { sessionId: this.sessionId });
         break;
@@ -1106,6 +1243,7 @@ class AgentViewProvider {
     this.mode = "review";
     this.fileCheckpoints.clear();
     this.refreshFileHasCheckpointContext();
+    this.checkpointDecorationProvider?.refresh(undefined);
     if (this.acp) {
       const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir();
       const s = await this.acp.request("session/new", { cwd, mcpServers: [] });
@@ -1171,6 +1309,10 @@ ${hasMd ? `<link rel="stylesheet" href="${mdcss}">` : ""}
     <div id="planBar" hidden></div>
     <div id="permissionBar" hidden></div>
     <div id="attachRow" hidden></div>
+    <div id="checkpointBar" class="checkpointbar" hidden>
+      <button id="cpbarHead" class="cpbar-head" type="button"></button>
+      <div id="cpbarBody" class="cpbar-body" hidden></div>
+    </div>
     <div class="input-wrap">
       <div id="mentionPopup" class="mention-popup" hidden></div>
       <textarea id="input" rows="3" placeholder="Describe a task. Type @ to reference a file. Review mode plans first; Approve executes with your OK."></textarea>
@@ -1194,6 +1336,8 @@ ${hasMd ? `<script src="${mdjs}"></script>` : ""}
 
 async function activate(context) {
   const provider = new AgentViewProvider(context);
+  const checkpointDecorationProvider = new CheckpointDecorationProvider(provider);
+  provider.checkpointDecorationProvider = checkpointDecorationProvider;
 
   // Koder ships its own agent — make sure the leftover built-in chat surfaces
   // stay off even where extension configurationDefaults don't reach (packaged
@@ -1349,10 +1493,13 @@ async function activate(context) {
         provider.post({ type: "system", text: `Could not undo ${relPath}.` });
         return;
       }
+      provider.notifyReverted(res.reverted);
       // receipt shows in chat too, same pattern doc 11 §6 sketches
       provider.post({ type: "system", text: `Reverted ${relPath}.` });
     }),
     vscode.window.onDidChangeActiveTextEditor(() => provider.refreshFileHasCheckpointContext()),
+    vscode.workspace.registerTextDocumentContentProvider("koder-checkpoint", checkpointContentProvider),
+    vscode.window.registerFileDecorationProvider(checkpointDecorationProvider),
   );
 }
 

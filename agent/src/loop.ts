@@ -5,7 +5,7 @@
  * and system prompt are 100% ours.
  */
 import { logRoyalAudit, summarizeInput, summarizeText } from "./audit.js";
-import { checkpointBaseline, checkpointBeforeMutation, commitAfterTool } from "./checkpoint.js";
+import { checkpointBaseline, checkpointBeforeMutation, commitAfterTool, filesChangedSinceCommit } from "./checkpoint.js";
 import { envBlock, loadRules, scrubSecrets } from "./context.js";
 import { loadConfig, resolveModel } from "./config.js";
 import { floorCheck, royalTamperCheck } from "./floor.js";
@@ -36,11 +36,19 @@ export interface LoopCallbacks {
    */
   onBaseline?(sha: string | null): void;
   /**
-   * Fired once per successful non-royal mutating tool call, right after its
-   * own shadow-git commit lands (docs/research/11-prompt-checkpoints-undo.md
-   * §2.3/§3.2) — the hook point for the `koder/checkpoint` notification and
-   * for appending to `session.checkpoints`. Royal mode has its own separate
-   * (already-shipped) checkpoint path and does not fire this.
+   * Fired once per successful mutating tool call that actually changed a
+   * file, right after its shadow-git checkpoint lands
+   * (docs/research/11-prompt-checkpoints-undo.md §2.3/§3.2) — the hook point
+   * for the `koder/checkpoint` notification and for appending to
+   * `session.checkpoints`. Fires for BOTH non-royal modes (from
+   * `commitAfterTool`'s post-mutation commit) and royal mode (from a
+   * non-committing working-tree diff against `checkpointBeforeMutation`'s
+   * pre-mutation commit, per doc 09 §6 Phase B item 4 — "gain prompt-scoped
+   * undo for Royal actions as a byproduct") so both UI surfaces' "Files
+   * changed" card/undo affordance work the same way regardless of mode.
+   * Never fires with an empty `files` list — a `--allow-empty` commit can
+   * still land for a no-net-diff call, but neither UI surface must ever
+   * show a zero-file "Files changed" row.
    */
   onCheckpoint?(info: { toolCallId: string; toolName: string; sha: string; files: string[] }): void;
 }
@@ -251,6 +259,17 @@ export async function runPrompt(
           // stopped the action itself. Best-effort — never blocks the call.
           const cp = await checkpointBeforeMutation(session.cwd, `${tc.name}: ${title}`);
           checkpointSha = cp.sha;
+          // This before-mutation commit doubles as this prompt's baseline
+          // for undo purposes — the same `onBaseline` hook non-royal mode
+          // uses (below, §2.3), fired once per prompt from whichever
+          // mutating call happens first. Without this, Royal-mode
+          // checkpoints would have nowhere for `koder/undo_file`/
+          // `koder/undo_prompt` to revert to (server.ts's `ensureEntry`
+          // needs a `baselineSha`).
+          if (checkpointSha && !baselineTaken) {
+            cb.onBaseline?.(checkpointSha);
+            baselineTaken = true;
+          }
         }
       } else {
         // Destructive-command floor: deterministic, code-enforced, checked
@@ -337,9 +356,23 @@ export async function runPrompt(
         // non-royal mutating tool call, immediately notifiable with a real
         // SHA (unlike Royal's before-mutation-only commit above). `path` is
         // only ever set for write_file/edit_file — bash stages the full tree.
+        // Only notify when the diff is non-empty — an --allow-empty commit
+        // still yields a truthy `sha` even for a no-net-diff call (e.g.
+        // write_file writing identical bytes), and neither UI surface must
+        // ever show a "Files changed (0)" card/row.
         if (!isRoyal && spec.dangerous) {
           const cp = await commitAfterTool(session.cwd, promptId, tc.id, tc.name, path);
-          if (cp.sha) cb.onCheckpoint?.({ toolCallId: tc.id, toolName: tc.name, sha: cp.sha, files: cp.files });
+          if (cp.sha && cp.files.length) cb.onCheckpoint?.({ toolCallId: tc.id, toolName: tc.name, sha: cp.sha, files: cp.files });
+        } else if (isRoyal && spec.dangerous && checkpointSha) {
+          // Royal's own before-mutation commit (above) must stay the
+          // shadow-repo HEAD afterward (see checkpointBeforeMutation's
+          // callers/tests), so unlike commitAfterTool this reads the diff
+          // against the CURRENT working tree rather than creating another
+          // commit — then notifies with the SAME `onCheckpoint` hook
+          // non-royal tool calls use, closing the gap where Royal-mode
+          // edits never surfaced a Files-changed/undo card in either UI.
+          const files = await filesChangedSinceCommit(session.cwd, checkpointSha);
+          if (files.length) cb.onCheckpoint?.({ toolCallId: tc.id, toolName: tc.name, sha: checkpointSha, files });
         }
 
         if (session.toolRepeatCount === 2) {

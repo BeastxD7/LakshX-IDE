@@ -43,7 +43,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { readdir } from "node:fs/promises";
+import { readdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -225,25 +225,34 @@ async function hasStagedChanges(gitDir: string, worktree: string): Promise<boole
 }
 
 /**
- * File list between two shadow-repo SHAs, derived from `git diff --raw` (not
- * from any tool's declared input path — doc 11 §2.4) with gitlink entries
- * (mode 160000, submodule/nested-repo references) filtered out (§2.2/§2.4) so
+ * Parse `git diff --raw` output into a plain path list, dropping gitlink
+ * entries (mode 160000, submodule/nested-repo references, §2.2/§2.4) so
  * neither UI surface can ever offer a no-op "undo" on a path that was never
- * really captured.
+ * really captured. Shared by `diffFiles` (two-ref, committed-to-committed)
+ * and `filesChangedSinceCommit` (one-ref, committed-to-working-tree) below —
+ * same raw-line shape either way.
+ */
+function parseDiffRaw(stdout: string): string[] {
+  const files: string[] = [];
+  for (const line of stdout.split("\n")) {
+    if (!line) continue;
+    const m = line.match(/^:(\d+) (\d+) [0-9a-f]+\.* [0-9a-f]+\.* \S+\t(.+)$/);
+    if (!m) continue;
+    const [, oldMode, newMode, path] = m;
+    if (oldMode === "160000" || newMode === "160000") continue; // gitlink — never surfaced
+    files.push(path);
+  }
+  return files;
+}
+
+/**
+ * File list between two shadow-repo SHAs, derived from `git diff --raw` (not
+ * from any tool's declared input path — doc 11 §2.4).
  */
 async function diffFiles(gitDir: string, worktree: string, a: string, b: string): Promise<string[]> {
   try {
     const { stdout } = await git(gitDir, worktree, ["diff", "--raw", "--no-renames", a, b]);
-    const files: string[] = [];
-    for (const line of stdout.split("\n")) {
-      if (!line) continue;
-      const m = line.match(/^:(\d+) (\d+) [0-9a-f]+\.* [0-9a-f]+\.* \S+\t(.+)$/);
-      if (!m) continue;
-      const [, oldMode, newMode, path] = m;
-      if (oldMode === "160000" || newMode === "160000") continue; // gitlink — never surfaced
-      files.push(path);
-    }
-    return files;
+    return parseDiffRaw(stdout);
   } catch {
     return [];
   }
@@ -254,6 +263,105 @@ export async function fileListBetween(cwd: string, a: string, b: string): Promis
   const worktree = resolve(cwd);
   const gitDir = shadowPaths(worktree).gitDir;
   return diffFiles(gitDir, worktree, a, b);
+}
+
+/**
+ * Files that differ between a shadow-repo commit and the CURRENT on-disk
+ * working tree — no staging, no committing. This is Royal mode's
+ * counterpart to `commitAfterTool`'s `{sha, files}` diff: Royal's own
+ * passive checkpoint (`checkpointBeforeMutation`) commits BEFORE a mutation
+ * runs and must keep doing only that — the shadow-repo HEAD staying at the
+ * pre-mutation commit afterward is exactly what
+ * "royal mode: checkpoints workspace state BEFORE a mutating tool call
+ * runs" (agent/test/server-e2e.test.ts) asserts. So unlike `commitAfterTool`,
+ * this never advances HEAD; it just reads what changed on disk relative to
+ * a commit that's already there. `sha` should be the checkpoint taken
+ * immediately before the tool ran — the returned files are exactly what
+ * that tool call changed.
+ */
+export async function filesChangedSinceCommit(cwd: string, sha: string): Promise<string[]> {
+  try {
+    const worktree = resolve(cwd);
+    const { gitDir } = shadowPaths(worktree);
+    // `git diff <ref>` (no second ref, i.e. "ref vs working tree") only
+    // considers paths already in the INDEX — a brand-new file the tool just
+    // created is untracked and silently invisible to it until staged. `git
+    // add` only touches the index, never a commit, so this is still safe
+    // against advancing HEAD (verified against the shadow repo's actual
+    // `ls-tree HEAD`, unaffected by index state) — the same magic-pathspec
+    // exclude used everywhere else in this file.
+    await git(gitDir, worktree, ["add", "-A", "--", ".", ":!**/.git", ":!**/.git/**"]);
+    const { stdout } = await git(gitDir, worktree, ["diff", "--raw", "--no-renames", sha]);
+    const files = parseDiffRaw(stdout);
+    // Royal's own `hasConflict` check needs a reliable "what did the
+    // mechanism itself last write here" reference, same as non-royal gets
+    // for free from `commitAfterTool` advancing HEAD — see
+    // `advanceRoyalMirror`'s doc comment for why this can't just be HEAD
+    // for royal mode. Best-effort: a failure here must never lose the
+    // `files` result the caller's `koder/checkpoint` notification needs.
+    if (files.length) await advanceRoyalMirror(gitDir, worktree, sha);
+    return files;
+  } catch {
+    return [];
+  }
+}
+
+/** Never the checked-out branch — see `advanceRoyalMirror`. */
+const ROYAL_MIRROR_REF = "refs/koder/royal-mirror";
+
+/**
+ * Advance `refs/koder/royal-mirror` — a side-ref, never the checked-out
+ * branch/HEAD — to a commit reflecting whatever `filesChangedSinceCommit`
+ * just staged into the shadow repo's index. Royal mode's before-mutation
+ * commits deliberately never advance HEAD (`checkpointBeforeMutation`'s doc
+ * comment; the "checkpoints workspace state BEFORE a mutating tool call"
+ * e2e test asserts HEAD stays at the pre-mutation commit), so `hasConflict`'s
+ * HEAD-based "does disk still match what the mechanism itself last wrote"
+ * check is blind for royal-sourced checkpoints — every royal undo would
+ * otherwise misreport a plain, ordinary revert as a manual-edit conflict.
+ * This ref is Royal's equivalent of that same fact, built with
+ * `commit-tree`/`update-ref` plumbing specifically because those never touch
+ * HEAD or require a checkout, unlike `git commit`. Best-effort: `hasConflict`
+ * tolerates a missing or behind-the-times mirror ref (falls through to its
+ * other checks) rather than depending on this succeeding.
+ */
+async function advanceRoyalMirror(gitDir: string, worktree: string, fallbackParent: string): Promise<void> {
+  try {
+    const { stdout: treeOut } = await git(gitDir, worktree, ["write-tree"]);
+    const tree = treeOut.trim();
+    let parent = fallbackParent;
+    try {
+      const { stdout: curOut } = await git(gitDir, worktree, ["rev-parse", ROYAL_MIRROR_REF]);
+      if (curOut.trim()) parent = curOut.trim();
+    } catch {
+      /* no mirror ref yet in this workspace — anchor it off the before-mutation commit */
+    }
+    const { stdout: commitOut } = await git(gitDir, worktree, ["commit-tree", tree, "-p", parent, "-m", "royal-mirror"]);
+    await git(gitDir, worktree, ["update-ref", ROYAL_MIRROR_REF, commitOut.trim()]);
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
+ * Blob content of `path` at shadow-repo commit `sha` — read-only. Used by
+ * the "open diff" UI action (both chat surfaces, see server.ts's
+ * `koder/checkpoint_file_before`) to materialize the pre-checkpoint version
+ * of a file so the client can hand it to `vscode.diff` against the live
+ * file on disk, without needing git access client-side (only the agent
+ * process touches the shadow-git plumbing). Returns `null` if the path
+ * didn't exist at that commit (e.g. the file was newly created after it) —
+ * a brand-new file's "before" state is legitimately "nothing," not an error.
+ */
+export async function readFileAtCommit(cwd: string, sha: string, path: string): Promise<string | null> {
+  try {
+    const worktree = resolve(cwd);
+    const { gitDir } = shadowPaths(worktree);
+    const { stdout } = await git(gitDir, worktree, ["show", `${sha}:${path}`]);
+    return stdout;
+  } catch {
+    return null;
+  }
 }
 
 // ---- cross-process lock (doc 11 §2.5) --------------------------------------
@@ -424,7 +532,30 @@ export async function hasConflict(cwd: string, path: string, targetSha: string):
   const { gitDir } = shadowPaths(worktree);
   if (await diffQuiet(gitDir, worktree, targetSha, path)) return false; // already at target — no-op
   if (await diffQuiet(gitDir, worktree, "HEAD", path)) return false; // matches the checkpoint mechanism's own last write
-  return true; // matches neither — genuine external edit
+  // Royal-sourced checkpoints: HEAD alone doesn't capture "what the
+  // mechanism itself last wrote" the way it does for non-royal (Royal's
+  // before-mutation commits deliberately never advance HEAD — see
+  // `advanceRoyalMirror`'s doc comment). `refs/koder/royal-mirror` is
+  // Royal's equivalent fact — but ONLY consult it when it actually exists:
+  // `diffQuiet`'s own "ref unresolvable, can't tell" fallback treats an
+  // error as "clean," which would be correct in isolation but, chained as a
+  // third OR'd condition here, would make EVERY workspace that has never
+  // used royal mode (i.e. almost all of them) report "no conflict"
+  // unconditionally — silently defeating checks 1/2 above. Gating on
+  // existence first keeps this purely additive.
+  if (await royalMirrorExists(gitDir, worktree)) {
+    if (await diffQuiet(gitDir, worktree, ROYAL_MIRROR_REF, path)) return false;
+  }
+  return true; // matches none of the above — genuine external edit
+}
+
+async function royalMirrorExists(gitDir: string, worktree: string): Promise<boolean> {
+  try {
+    await git(gitDir, worktree, ["rev-parse", "--verify", "--quiet", ROYAL_MIRROR_REF]);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export type UndoResult = { ok: true; reverted: string[] } | { ok: false; conflict: { paths: string[] } };
@@ -447,9 +578,37 @@ export async function undoPaths(cwd: string, paths: string[], targetSha: string,
     if (conflicts.length) return { ok: false, conflict: { paths: conflicts } };
   }
   return withLock(dir, async () => {
-    await git(gitDir, worktree, ["checkout", targetSha, "--", ...paths]);
+    // `git checkout <sha> -- <path>` refuses (errors, doesn't delete) when
+    // <path> is a pathspec absent from <sha>'s tree — the very common case
+    // of undoing a file the agent created FROM NOTHING (it never existed at
+    // the target, so "restore it" means "remove it," which this form of
+    // checkout does not do on its own). Split accordingly: existing-at-target
+    // paths go through the normal one-invocation checkout (still atomic for
+    // that subset); newly-created paths are deleted directly and the
+    // deletion staged into the shadow index so future diffs/undos see it.
+    const existed: string[] = [];
+    const created: string[] = [];
+    for (const p of paths) {
+      if (await existsAtCommit(gitDir, worktree, targetSha, p)) existed.push(p);
+      else created.push(p);
+    }
+    if (existed.length) await git(gitDir, worktree, ["checkout", targetSha, "--", ...existed]);
+    for (const p of created) {
+      await rm(join(worktree, p), { force: true }).catch(() => {});
+      await git(gitDir, worktree, ["add", "-A", "--", p]).catch(() => {});
+    }
     return { ok: true, reverted: paths };
   });
+}
+
+/** Whether `path` exists in the shadow repo's tree at `sha` — `git cat-file -e` (existence-only, no content read). */
+async function existsAtCommit(gitDir: string, worktree: string, sha: string, path: string): Promise<boolean> {
+  try {
+    await git(gitDir, worktree, ["cat-file", "-e", `${sha}:${path}`]);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Undo a single file — same primitive as `undoPaths`, one path (doc 11 §4.1). */
@@ -519,6 +678,13 @@ export async function maybeCompact(cwd: string): Promise<{ compacted: boolean }>
       // forcing overwrite of the previous branch ref of the same name — this is
       // the actual moment old commits become unreachable.
       await git(gitDir, worktree, ["branch", "-M", mainBranch]);
+      // `refs/koder/royal-mirror` (advanceRoyalMirror) is a side-ref this
+      // orphan-root dance never touches — left alone, it would keep every
+      // pre-compaction commit it ever pointed through reachable forever,
+      // silently defeating the whole point of compacting. Drop it; the next
+      // royal tool call recreates it fresh, anchored off a commit that
+      // descends from the new orphan root.
+      await git(gitDir, worktree, ["update-ref", "-d", ROYAL_MIRROR_REF]).catch(() => {});
       await git(gitDir, worktree, ["reflog", "expire", "--expire=now", "--all"]);
       await git(gitDir, worktree, ["gc", "--prune=now", "--quiet"]);
       return { compacted: true };

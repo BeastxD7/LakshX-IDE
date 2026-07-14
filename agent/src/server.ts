@@ -8,7 +8,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
-import { maybeCompact, undoFile, undoPaths } from "./checkpoint.js";
+import { maybeCompact, readFileAtCommit, undoFile, undoPaths } from "./checkpoint.js";
 import { availableProviders, loadConfig } from "./config.js";
 import { runPrompt, toolTitle, type AgentMode, type AgentSession } from "./loop.js";
 import { probeProvider } from "./providers/validate.js";
@@ -332,6 +332,23 @@ acp
         if (Object.keys(overlap).length > 0) return { ok: false, overlap };
       }
       return undoPaths(session.cwd, files, target.baselineSha, force);
+    },
+  )
+  // "Open diff" (client-driven, not a tool the model can call): the pre-turn
+  // version of a file at the prompt's baseline commit, for the client to
+  // hand to `vscode.diff` against the live file on disk — the shadow-git
+  // plumbing only lives in this process, so the client can't read it itself.
+  .onRequest(
+    "koder/checkpoint_file_before",
+    (v: unknown) => v as { sessionId: string; promptId: string; path: string },
+    async (ctx) => {
+      const session = sessions.get(ctx.params.sessionId);
+      if (!session) throw new Error(`unknown session ${ctx.params.sessionId}`);
+      const target = session.checkpoints.find((c) => c.promptId === ctx.params.promptId);
+      if (!target) throw new Error(`no checkpoint found for prompt ${ctx.params.promptId}`);
+      if (!target.baselineSha) throw new Error(`no baseline recorded for prompt ${ctx.params.promptId}`);
+      const content = await readFileAtCommit(session.cwd, target.baselineSha, ctx.params.path);
+      return { content };
     },
   )
   .onNotification("session/cancel", async (ctx) => {

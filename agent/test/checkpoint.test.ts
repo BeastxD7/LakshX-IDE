@@ -114,6 +114,16 @@ test("prompt checkpoints + undo — round trip, per-file isolation, overlap, con
             assert.equal(await readFile(join(workspace, "a.txt"), "utf8"), "new-a");
             assert.equal(await readFile(join(workspace, "b.txt"), "utf8"), "new-b");
 
+            // "open diff": the pre-turn content the client would hand to
+            // `vscode.diff` against the live file — must reflect the
+            // baseline (before this prompt ran), not the current on-disk content.
+            const beforeContent = await ctx.request<{ content: string | null }>("koder/checkpoint_file_before", {
+              sessionId,
+              promptId: "pr_round1",
+              path: "a.txt",
+            });
+            assert.equal(beforeContent.content, "orig-a");
+
             const undo1 = await ctx.request<any>("koder/undo_prompt", { sessionId, promptId: "pr_round1" });
             assert.equal(undo1.ok, true);
             assert.deepEqual([...undo1.reverted].sort(), ["a.txt", "b.txt"]);
@@ -218,6 +228,87 @@ test("prompt checkpoints + undo — round trip, per-file isolation, overlap, con
           assert.match(log, /tool:pr_round1:call_a:write_file/);
           assert.match(log, /tool:pr_round1:call_b:write_file/);
         });
+      });
+  } finally {
+    child.kill();
+    await fake.stop();
+    await rm(home, { recursive: true, force: true });
+    await rm(workspace, { recursive: true, force: true });
+    if (process.exitCode && childStderr) console.error("--- server stderr ---\n" + childStderr);
+  }
+});
+
+test("royal mode: tool calls also fire koder/checkpoint (files-changed UI parity with non-royal modes)", { timeout: 60_000 }, async (t) => {
+  // Confirmed root cause: loop.ts's royal branch only ever called
+  // checkpointBeforeMutation (its own passive audit checkpoint), never
+  // cb.onCheckpoint — so a genuine on-disk edit made in Royal mode never
+  // produced a "Files changed" card or an undo button in either UI surface,
+  // even though the shadow-git commit and audit-log entry were both there.
+  // This test drives a real write_file call in royal mode and asserts the
+  // same `koder/checkpoint` notification (and, downstream, a working
+  // `koder/undo_file` round trip) that auto/approve modes already produce.
+  const fake = new FakeOpenAI();
+  await fake.start();
+  const home = await setupHome(fake);
+  const workspace = await mkdtemp(join(tmpdir(), "koder-cp-royal-ws-"));
+
+  const child = spawnServer(home, workspace);
+  let childStderr = "";
+  child.stderr!.on("data", (d) => (childStderr += d));
+  const stream = acp.ndJsonStream(Writable.toWeb(child.stdin!), Readable.toWeb(child.stdout!) as ReadableStream<Uint8Array>);
+
+  const checkpoints: any[] = [];
+
+  try {
+    await acp
+      .client({ name: "koder-checkpoint-royal-test" })
+      .onRequest(acp.methods.client.session.requestPermission, async () => ({
+        outcome: { outcome: "selected", optionId: "allow" },
+      }))
+      .onNotification("koder/checkpoint", (v: unknown) => v as any, async (ctx) => void checkpoints.push(ctx.params))
+      .connectWith(stream, async (ctx) => {
+        await ctx.request(acp.methods.agent.initialize, { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+
+        await t.test("royal mode write_file fires koder/checkpoint with a real sha and the touched file", () =>
+          ctx.buildSession(workspace).withSession(async (session: any) => {
+            const sessionId = session.sessionId;
+            await ctx.request(acp.methods.agent.session.setMode, { sessionId, modeId: "royal" });
+
+            await writeFile(join(workspace, "royal-seed.txt"), "seed");
+
+            fake.enqueue(
+              toolTurn("call_royal_wf", "write_file", { path: "royal.txt", content: "hello-royal-checkpoint" }),
+              textTurn("Wrote it."),
+            );
+            const before = checkpoints.length;
+            const res = await ctx.request<{ stopReason: string }>(acp.methods.agent.session.prompt, {
+              sessionId,
+              prompt: [{ type: "text", text: "create royal.txt" }],
+              _meta: { promptId: "pr_royal1" },
+            });
+            assert.equal(res.stopReason, "end_turn");
+
+            await new Promise((r) => setTimeout(r, 50)); // let debounced notifies land
+            const mine = checkpoints.slice(before);
+            assert.equal(mine.length, 1, "royal mode must fire koder/checkpoint just like non-royal modes");
+            assert.equal(mine[0].promptId, "pr_royal1");
+            assert.equal(mine[0].toolName, "write_file");
+            assert.ok(typeof mine[0].sha === "string" && mine[0].sha.length > 0);
+            assert.deepEqual(mine[0].files, ["royal.txt"]);
+
+            // and the resulting checkpoint record is actually undoable —
+            // same UI-facing data non-royal tool calls produce, not just a
+            // notification with no real effect behind it
+            assert.equal(await readFile(join(workspace, "royal.txt"), "utf8"), "hello-royal-checkpoint");
+            const undo = await ctx.request<any>("koder/undo_file", { sessionId, path: "royal.txt" });
+            assert.equal(undo.ok, true);
+            assert.deepEqual(undo.reverted, ["royal.txt"]);
+            // royal.txt never existed before this prompt — "undo" a brand-new
+            // file means delete it, not error out on a pathspec absent from
+            // the target tree
+            assert.equal(existsSync(join(workspace, "royal.txt")), false);
+          }),
+        );
       });
   } finally {
     child.kill();
