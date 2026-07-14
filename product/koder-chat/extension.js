@@ -13,7 +13,8 @@ class AcpClient {
     this.pending = new Map();
     this.handlers = handlers;
     this.child = cp.spawn(command, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
-    this.child.stderr.on("data", (d) => console.log(`[koder-agent] ${d}`));
+    this.child.stderr.on("data", (d) => handlers.onLog?.(String(d)));
+    this.child.on("error", (err) => handlers.onError?.(err));
     this.child.on("exit", (code) => handlers.onExit?.(code));
     let buf = "";
     this.child.stdout.on("data", (chunk) => {
@@ -151,6 +152,7 @@ class AgentViewProvider {
     this.acp = null;
     this.sessionId = null;
     this.permissionWaiters = new Map();
+    this.log = vscode.window.createOutputChannel("Koder Agent");
   }
 
   resolveWebviewView(view) {
@@ -172,8 +174,16 @@ class AgentViewProvider {
       return false;
     }
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir();
+    this.log.appendLine(`spawning agent: ${spec.command} ${spec.args.join(" ")}`);
     this.acp = new AcpClient(spec.command, spec.args, spec.cwd ?? cwd, spec.env, {
+      onLog: (line) => this.log.append(line),
+      onError: (err) => {
+        this.log.appendLine(`SPAWN ERROR: ${err.message}`);
+        this.post({ type: "system", text: `agent failed to start: ${err.message}` });
+        this.acp = null;
+      },
       onExit: (code) => {
+        this.log.appendLine(`agent exited (${code})`);
         this.post({ type: "system", text: `agent exited (${code}) — will restart on next message` });
         this.acp = null;
         this.sessionId = null;
@@ -341,12 +351,10 @@ function activate(context) {
   statusItem.command = "koder.openAgent";
   statusItem.show();
 
-  // agent-first IDE: surface the panel on startup (until the user has seen it)
-  if (!context.globalState.get("koder.panelSeen")) {
-    setTimeout(() => {
-      vscode.commands.executeCommand("koder.agentView.focus");
-      context.globalState.update("koder.panelSeen", true);
-    }, 1200);
+  // agent-first IDE: the agent panel is part of the default layout — open it
+  // on every startup unless the user turned that off
+  if (vscode.workspace.getConfiguration("koder").get("agent.openOnStartup", true)) {
+    setTimeout(() => vscode.commands.executeCommand("koder.agentView.focus"), 900);
   }
 
   context.subscriptions.push(
