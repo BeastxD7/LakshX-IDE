@@ -11,6 +11,7 @@
     "spike": "tsx src/spike.ts",
     "serve": "tsx src/server.ts",
     "test": "tsx src/test-client.ts",
+    "test:unit": "npx tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "bundle": "esbuild src/server.ts --bundle --platform=node --target=node20 --format=cjs --outfile=../product/koder-chat/agent/server.cjs --log-level=warning"
   },

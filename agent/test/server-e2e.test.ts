@@ -1,0 +1,262 @@
+/**
+ * End-to-end tests for the agent loop through the real server.
+ *
+ * We spawn `src/server.ts` (ACP over stdio) as a subprocess with HOME pointed
+ * at a temp directory whose .koder/providers.json routes the "fake" provider
+ * to a scripted OpenAI-compatible SSE server on localhost. No real API keys.
+ */
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { Readable, Writable } from "node:stream";
+import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import * as acp from "@agentclientprotocol/sdk";
+import { PRESETS } from "../src/config.js";
+import {
+  FakeOpenAI,
+  finish,
+  reasoningDelta,
+  textDelta,
+  textTurn,
+  toolTurn,
+} from "./helpers/fake-openai.js";
+
+const agentDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const tsxBin = join(agentDir, "node_modules", ".bin", "tsx");
+const serverPath = join(agentDir, "src", "server.ts");
+
+type Updates = any[];
+
+async function waitFor(pred: () => boolean, what: string, ms = 5000): Promise<void> {
+  const start = Date.now();
+  while (!pred()) {
+    if (Date.now() - start > ms) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
+/** Send a prompt and drain session updates until the turn stops. */
+async function runTurn(session: any, text: string): Promise<{ updates: Updates; response: any }> {
+  const done = session.prompt(text);
+  const updates: Updates = [];
+  for (;;) {
+    const msg = await session.nextUpdate();
+    if (msg.kind === "stop") return { updates, response: await done };
+    updates.push(msg.update);
+  }
+}
+
+const messageText = (updates: Updates) =>
+  updates
+    .filter((u) => u.sessionUpdate === "agent_message_chunk" && u.content?.type === "text")
+    .map((u) => u.content.text)
+    .join("");
+
+const thoughtText = (updates: Updates) =>
+  updates
+    .filter((u) => u.sessionUpdate === "agent_thought_chunk" && u.content?.type === "text")
+    .map((u) => u.content.text)
+    .join("");
+
+const lastToolMessage = (fake: FakeOpenAI, toolCallId: string) => {
+  const req = fake.requests.at(-1)!;
+  return req.messages.find((m) => m.role === "tool" && m.tool_call_id === toolCallId);
+};
+
+test("koder agent e2e over ACP against a scripted provider", { timeout: 120_000 }, async (t) => {
+  const fake = new FakeOpenAI();
+  await fake.start();
+
+  const home = await mkdtemp(join(tmpdir(), "koder-e2e-home-"));
+  const workspace = await mkdtemp(join(tmpdir(), "koder-e2e-ws-"));
+  await mkdir(join(home, ".koder"), { recursive: true });
+  await writeFile(
+    join(home, ".koder", "providers.json"),
+    JSON.stringify({
+      defaultModel: "fake/test-model",
+      providers: {
+        fake: { kind: "openai", baseUrl: `http://127.0.0.1:${fake.port}/v1`, apiKey: "test-key-123" },
+      },
+    }),
+  );
+
+  // Deterministic child env: fake HOME, no real provider keys leaking in.
+  const env: Record<string, string | undefined> = { ...process.env, HOME: home };
+  for (const preset of Object.values(PRESETS)) delete env[preset.envKey];
+  delete env.KODER_ENABLE_OLLAMA;
+
+  const child = spawn(tsxBin, [serverPath], {
+    cwd: workspace,
+    env: env as NodeJS.ProcessEnv,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let childStderr = "";
+  child.stderr!.on("data", (d) => (childStderr += d));
+
+  const planReady: Array<{ sessionId: string; path: string }> = [];
+  const permissionRequests: any[] = [];
+  let permissionAnswer: "allow" | "deny" = "deny";
+
+  const stream = acp.ndJsonStream(
+    Writable.toWeb(child.stdin!),
+    Readable.toWeb(child.stdout!) as ReadableStream<Uint8Array>,
+  );
+
+  try {
+    await acp
+      .client({ name: "koder-e2e-test" })
+      .onRequest(acp.methods.client.session.requestPermission, async (ctx) => {
+        permissionRequests.push(ctx.params);
+        return { outcome: { outcome: "selected", optionId: permissionAnswer } };
+      })
+      .onNotification(
+        "koder/plan_ready",
+        (v: unknown) => v as { sessionId: string; path: string },
+        async (ctx) => void planReady.push(ctx.params),
+      )
+      .connectWith(stream, async (ctx) => {
+        const init = await ctx.request(acp.methods.agent.initialize, {
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: {},
+        });
+        assert.equal(init.protocolVersion, acp.PROTOCOL_VERSION);
+
+        await t.test("koder/models reports default model and configured providers", async () => {
+          const models = await ctx.request<{ defaultModel: string; providers: string[] }>("koder/models", {});
+          assert.equal(models.defaultModel, "fake/test-model");
+          assert.deepEqual(models.providers, ["fake"]); // only our keyed provider; ollama gated off
+        });
+
+        await t.test("review mode: dangerous tool is blocked, plan triggers koder/plan_ready", () =>
+          ctx.buildSession(workspace).withSession(async (session: any) => {
+            // invalid mode ids are ignored — session must stay in review
+            await ctx.request(acp.methods.agent.session.setMode, {
+              sessionId: session.sessionId,
+              modeId: "bogus-mode",
+            });
+
+            // Turn A: model tries bash in review mode → hard-blocked, no permission prompt
+            fake.enqueue(
+              toolTurn("call_rev1", "bash", { command: "rm -rf build" }),
+              textTurn("I cannot run commands in review mode."),
+            );
+            const a = await runTurn(session, "clean the build dir");
+            assert.equal(a.response.stopReason, "end_turn");
+            assert.equal(permissionRequests.length, 0, "review mode must not ask for permission");
+
+            // request 1 only offered the read-only tools
+            const offered = fake.requests.at(-2)!.tools.map((tl) => tl.function.name).sort();
+            assert.deepEqual(offered, ["grep", "list_dir", "read_file"]);
+            // request 2 carries the declined tool result back to the model
+            assert.match(lastToolMessage(fake, "call_rev1")!.content, /declined/i);
+            // and the client saw the tool call fail
+            const upd = a.updates.find((u) => u.sessionUpdate === "tool_call_update" && u.toolCallId === "call_rev1");
+            assert.equal(upd.status, "failed");
+            assert.match(upd.content[0].content.text, /declined/i);
+            assert.equal(planReady.length, 0, "no plan_ready without a # Plan heading");
+
+            // Turn B: a "# Plan" reply saves a plan file and notifies koder/plan_ready
+            fake.enqueue(textTurn("Research done.\n\n# Plan\n1. Touch src/x.ts\n2. Run typecheck\n"));
+            const b = await runTurn(session, "plan the feature");
+            assert.equal(b.response.stopReason, "end_turn");
+            await waitFor(() => planReady.length === 1, "koder/plan_ready notification");
+            assert.equal(planReady[0].sessionId, session.sessionId);
+            assert.ok(planReady[0].path.startsWith(join(workspace, ".koder", "plans")));
+            assert.match(await readFile(planReady[0].path, "utf8"), /# Plan\n1\. Touch src\/x\.ts/);
+            // mode must NOT silently advance — no current_mode_update in either turn
+            for (const u of [...a.updates, ...b.updates]) {
+              assert.notEqual(u.sessionUpdate, "current_mode_update");
+            }
+          }),
+        );
+
+        await t.test("approve mode: bash asks permission; deny feeds an error result back", () =>
+          ctx.buildSession(workspace).withSession(async (session: any) => {
+            await ctx.request(acp.methods.agent.session.setMode, {
+              sessionId: session.sessionId,
+              modeId: "approve",
+            });
+            permissionAnswer = "deny";
+            fake.enqueue(
+              toolTurn("call_ap1", "bash", { command: "echo hi" }),
+              textTurn("Understood, I will not run it."),
+            );
+            const { updates, response } = await runTurn(session, "run echo hi");
+            assert.equal(response.stopReason, "end_turn");
+
+            assert.equal(permissionRequests.length, 1, "approve mode must request permission");
+            const perm = permissionRequests[0];
+            assert.equal(perm.sessionId, session.sessionId);
+            assert.equal(perm.toolCall.toolCallId, "call_ap1");
+            assert.equal(perm.toolCall.title, "$ echo hi");
+            assert.deepEqual(perm.options.map((o: any) => o.optionId).sort(), ["allow", "deny"]);
+
+            // the denial reaches the model as a tool message on the next request
+            assert.match(lastToolMessage(fake, "call_ap1")!.content, /declined/i);
+            const upd = updates.find((u) => u.sessionUpdate === "tool_call_update" && u.toolCallId === "call_ap1");
+            assert.equal(upd.status, "failed");
+          }),
+        );
+
+        await t.test("auto mode: no permission prompt, tool executes, output reaches the model", (t2) =>
+          ctx.buildSession(workspace).withSession(async (session: any) => {
+            await ctx.request(acp.methods.agent.session.setMode, {
+              sessionId: session.sessionId,
+              modeId: "auto",
+            });
+            const permsBefore = permissionRequests.length;
+            fake.enqueue(
+              toolTurn("call_auto1", "bash", { command: "echo koder-auto-ok" }),
+              textTurn("Done."),
+            );
+            const { updates, response } = await runTurn(session, "run the echo");
+            assert.equal(response.stopReason, "end_turn");
+            assert.equal(permissionRequests.length, permsBefore, "auto mode must not ask for permission");
+
+            assert.match(lastToolMessage(fake, "call_auto1")!.content, /koder-auto-ok/);
+            const upd = updates.find((u) => u.sessionUpdate === "tool_call_update" && u.toolCallId === "call_auto1");
+            assert.equal(upd.status, "completed");
+            assert.match(upd.content[0].content.text, /koder-auto-ok/);
+            assert.equal(messageText(updates), "Done.");
+
+            await t2.test("thinking: reasoning_content deltas stream as agent_thought_chunk", async () => {
+              fake.enqueue([
+                reasoningDelta("Considering the request"),
+                reasoningDelta(" carefully."),
+                textDelta("Final answer."),
+                finish("stop"),
+              ]);
+              const r = await runTurn(session, "think about it");
+              assert.equal(r.response.stopReason, "end_turn");
+              assert.equal(thoughtText(r.updates), "Considering the request carefully.");
+              assert.equal(messageText(r.updates), "Final answer.");
+            });
+
+            await t2.test("koder/set_model switches the model used for the session", async () => {
+              await ctx.request("koder/set_model", { sessionId: session.sessionId, model: "fake/other-model" });
+              fake.enqueue(textTurn("switched"));
+              await runTurn(session, "hello");
+              assert.equal(fake.requests.at(-1)!.model, "other-model");
+              assert.equal(fake.authHeaders.at(-1), "Bearer test-key-123");
+            });
+
+            await t2.test("koder/set_model to an unknown provider surfaces a refusal with the error", async () => {
+              await ctx.request("koder/set_model", { sessionId: session.sessionId, model: "nope/ghost-model" });
+              const r = await runTurn(session, "hello again"); // no scripted turn needed — never reaches provider
+              assert.equal(r.response.stopReason, "refusal");
+              assert.match(messageText(r.updates), /Unknown provider "nope"/);
+            });
+          }),
+        );
+      });
+  } finally {
+    child.kill();
+    await fake.stop();
+    await rm(home, { recursive: true, force: true });
+    await rm(workspace, { recursive: true, force: true });
+    if (process.exitCode && childStderr) console.error("--- server stderr ---\n" + childStderr);
+  }
+});

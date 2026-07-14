@@ -93,19 +93,29 @@ export async function runPrompt(
     session.mode === "review" ? TOOLS.filter((t) => !t.dangerous) : TOOLS;
 
   session.history.push({ role: "user", content: [{ type: "text", text: userText }] });
+  const userMessageIndex = session.history.length - 1;
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     if (signal?.aborted) return "cancelled";
 
-    const result = await adapter.runTurn({
-      model,
-      system: systemPrompt(session.cwd, session.mode),
-      messages: session.history,
-      tools: allowedTools.map(({ name, description, input_schema }) => ({ name, description, input_schema })),
-      signal,
-      onText: cb.onText,
-      onThinking: cb.onThinking,
-    });
+    let result;
+    try {
+      result = await adapter.runTurn({
+        model,
+        system: systemPrompt(session.cwd, session.mode),
+        messages: session.history,
+        tools: allowedTools.map(({ name, description, input_schema }) => ({ name, description, input_schema })),
+        signal,
+        onText: cb.onText,
+        onThinking: cb.onThinking,
+      });
+    } catch (err) {
+      // don't leave a dangling user message with no reply — a retry would
+      // otherwise produce two consecutive user turns, which several
+      // providers reject outright
+      if (session.history.length === userMessageIndex + 1) session.history.pop();
+      throw err;
+    }
 
     const assistantBlocks: ContentBlock[] = [];
     if (result.text) assistantBlocks.push({ type: "text", text: result.text });

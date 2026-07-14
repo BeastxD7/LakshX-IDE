@@ -59,7 +59,8 @@ export class OpenAICompatAdapter implements ChatAdapter {
       for (const tc of delta.tool_calls ?? []) {
         const slot = (calls[tc.index] ??= { id: "", name: "", args: "" });
         if (tc.id) slot.id = tc.id;
-        if (tc.function?.name) slot.name += tc.function.name;
+        // assign once: some providers resend the full name on every delta
+        if (tc.function?.name && !slot.name) slot.name = tc.function.name;
         if (tc.function?.arguments) slot.args += tc.function.arguments;
       }
       if (choice.finish_reason) finish = choice.finish_reason;
@@ -94,7 +95,8 @@ function toWire(messages: ChatMessage[]) {
     if (m.role === "assistant") {
       const text = m.content.filter((b) => b.type === "text").map((b: any) => b.text).join("");
       const toolUses = m.content.filter((b) => b.type === "tool_use") as any[];
-      const msg: any = { role: "assistant", content: text || null };
+      // strict providers reject content:null without tool_calls — use "" then
+      const msg: any = { role: "assistant", content: text || (toolUses.length ? null : "") };
       if (toolUses.length) {
         msg.tool_calls = toolUses.map((t) => ({
           id: t.id,
@@ -106,7 +108,9 @@ function toWire(messages: ChatMessage[]) {
     } else {
       const results = m.content.filter((b) => b.type === "tool_result") as any[];
       for (const r of results) {
-        out.push({ role: "tool", tool_call_id: r.tool_use_id, content: r.content });
+        // OpenAI wire has no is_error flag — surface failure in the content
+        const content = r.is_error ? `[tool failed] ${r.content}` : r.content;
+        out.push({ role: "tool", tool_call_id: r.tool_use_id, content });
       }
       const text = m.content.filter((b) => b.type === "text").map((b: any) => b.text).join("");
       if (text) out.push({ role: "user", content: text });

@@ -38,10 +38,11 @@ export const TOOLS: ToolSpec[] = [
     },
     async run(input, cwd) {
       const content = await readFile(abs(cwd, input.path), "utf8");
-      const lines = content.split("\n");
+      if (content === "") return "(empty file)";
+      const lines = content.replace(/\n$/, "").split("\n");
       const start = Math.max(0, (input.offset ?? 1) - 1);
       const slice = lines.slice(start, start + (input.limit ?? 800));
-      return slice.map((l, i) => `${start + i + 1}\t${l}`).join("\n") || "(empty file)";
+      return slice.map((l, i) => `${start + i + 1}\t${l}`).join("\n") || "(offset past end of file)";
     },
   },
   {
@@ -85,7 +86,8 @@ export const TOOLS: ToolSpec[] = [
       const count = content.split(input.old_string).length - 1;
       if (count === 0) throw new Error("old_string not found in file");
       if (count > 1) throw new Error(`old_string matches ${count} times — add surrounding context to make it unique`);
-      await writeFile(p, content.replace(input.old_string, input.new_string), "utf8");
+      // replacer fn: string form interprets $&, $', $$ patterns and corrupts code
+      await writeFile(p, content.replace(input.old_string, () => input.new_string), "utf8");
       return `edited ${p}`;
     },
   },
