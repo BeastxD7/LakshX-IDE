@@ -1,69 +1,13 @@
 // LakshX Agent panel — ACP client + webview UI. Plain CJS, zero dependencies:
 // a minimal ndjson JSON-RPC client speaks ACP to the LakshX Agent Runtime.
 const vscode = require("vscode");
-const cp = require("child_process");
 const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { CHANGELOG } = require("./changelog.js");
-
-// ---------- minimal ACP (JSON-RPC over ndjson/stdio) client ----------
-class AcpClient {
-  constructor(command, args, cwd, env, handlers) {
-    this.nextId = 1;
-    this.pending = new Map();
-    this.handlers = handlers;
-    this.child = cp.spawn(command, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
-    this.child.stderr.on("data", (d) => handlers.onLog?.(String(d)));
-    this.child.on("error", (err) => handlers.onError?.(err));
-    this.child.on("exit", (code) => handlers.onExit?.(code));
-    let buf = "";
-    this.child.stdout.on("data", (chunk) => {
-      buf += chunk.toString();
-      let nl;
-      while ((nl = buf.indexOf("\n")) !== -1) {
-        const line = buf.slice(0, nl).trim();
-        buf = buf.slice(nl + 1);
-        if (line) this._onMessage(JSON.parse(line));
-      }
-    });
-  }
-  _send(msg) {
-    this.child.stdin.write(JSON.stringify(msg) + "\n");
-  }
-  request(method, params) {
-    const id = this.nextId++;
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this._send({ jsonrpc: "2.0", id, method, params });
-    });
-  }
-  notify(method, params) {
-    this._send({ jsonrpc: "2.0", method, params });
-  }
-  async _onMessage(msg) {
-    if (msg.id !== undefined && (msg.result !== undefined || msg.error !== undefined)) {
-      const p = this.pending.get(msg.id);
-      if (p) {
-        this.pending.delete(msg.id);
-        msg.error ? p.reject(new Error(msg.error.message)) : p.resolve(msg.result);
-      }
-    } else if (msg.method && msg.id !== undefined) {
-      try {
-        const result = await this.handlers.onRequest(msg.method, msg.params);
-        this._send({ jsonrpc: "2.0", id: msg.id, result });
-      } catch (err) {
-        this._send({ jsonrpc: "2.0", id: msg.id, error: { code: -32603, message: String(err?.message ?? err) } });
-      }
-    } else if (msg.method) {
-      this.handlers.onNotification(msg.method, msg.params);
-    }
-  }
-  kill() {
-    try { this.child.kill(); } catch {}
-  }
-}
+const diagnostics = require("./diagnostics.js");
+const { AcpClient } = require("./acp-client.js");
 
 // ---------- runtime discovery ----------
 const isWin = process.platform === "win32";
@@ -896,6 +840,15 @@ class AgentViewProvider {
       } catch (err) {
         this.post({ type: "system", text: `error: ${err.message}` });
         this.post({ type: "turnEnd", stopReason: "error" });
+        // Best-effort: whatever made session/prompt reject client-side —
+        // including AcpClient.request()'s own timeout above — the runtime
+        // may still be churning away on this turn with nobody listening
+        // anymore. A stray notify to an already-dead/wedged child is
+        // harmless (fire-and-forget, no response expected), but if the
+        // process is merely slow rather than truly dead this at least gives
+        // it a chance to actually stop instead of burning tokens/compute on
+        // a turn the UI has already given up on.
+        this.acp?.notify("session/cancel", { sessionId: this.sessionId });
       }
     } finally {
       this.turnInProgress = false;
@@ -1005,230 +958,25 @@ class AgentViewProvider {
 
   /**
    * Assembles a full, human-readable diagnostic dump of this chat session
-   * for the "copy diagnostics" composer button — every REPLAYABLE event in
-   * `this.transcript`, chronologically, with timestamps/durations, full
-   * tool inputs/outputs, full thinking/assistant text, mode changes,
-   * checkpoints, and subagent activity. Built entirely from state
-   * extension.js already holds — synchronously, no request to the agent
-   * runtime — DELIBERATELY: the whole point of this tool is to capture a
-   * session that's HUNG (the "stuck and cut off at thinking phase"
-   * complaint this was built for). A stalled provider stream never fires
-   * `turnEnd`, so there is nothing safe to await here; if this ever grows
-   * an `await this.acp.request(...)`, it will hang exactly when someone
-   * needs it most.
-   *
-   * Consecutive same-type "chunk" (assistant text) / "thought" (thinking)
-   * events are coalesced into one block each — they arrive one small
-   * streamed delta at a time, so a raw one-line-per-delta dump would be
-   * hundreds of near-empty lines. Concatenating loses no content (every
-   * character is preserved) and turns the run into exactly the datum a
-   * "how long did thinking/generation take" question needs: first-chunk ts
-   * to last-chunk ts.
+   * for the "copy diagnostics" composer button. Actual report assembly
+   * lives in diagnostics.js (pure, no vscode dependency, unit-testable) —
+   * this method just supplies the vscode-derived bits (the workspace
+   * folder name) and this instance's own state. See diagnostics.js's
+   * buildDiagnosticReport doc comment for the full design rationale,
+   * including why this stays synchronous (must still work when the
+   * session is hung) and how thinking/assistant text is capped.
    */
   buildDiagnosticReport() {
-    const events = this.transcript;
     const workspace = vscode.workspace.workspaceFolders?.[0]?.name ?? "(no workspace)";
-    const hasTs = events.some((e) => typeof e.ts === "number");
-    const firstTs = hasTs ? events.find((e) => typeof e.ts === "number").ts : null;
-    const lastTsEvent = hasTs ? [...events].reverse().find((e) => typeof e.ts === "number") : null;
-    const lastTs = lastTsEvent ? lastTsEvent.ts : null;
-    const now = Date.now();
-
-    const fmtAbs = (ts) => (typeof ts === "number" ? new Date(ts).toISOString() : "unknown time");
-    const fmtRel = (ts) =>
-      typeof ts === "number" && firstTs != null ? `+${((ts - firstTs) / 1000).toFixed(3)}s` : "";
-    const fmtDur = (ms) => (typeof ms === "number" && !Number.isNaN(ms) ? `${(ms / 1000).toFixed(2)}s` : "unknown");
-    const tag = (ts) => `[${fmtAbs(ts)} ${fmtRel(ts)}]`.replace(" ]", "]");
-
-    // ---- coalesce chunk/thought runs; pair tool -> toolUpdate(s) ----
-    const blocks = [];
-    const openTools = new Map(); // toolCallId -> its block, so a later toolUpdate (possibly several) attaches
-    for (let i = 0; i < events.length; ) {
-      const e = events[i];
-      if (e.type === "chunk" || e.type === "thought") {
-        let j = i;
-        let text = "";
-        while (j < events.length && events[j].type === e.type) {
-          text += events[j].text ?? "";
-          j++;
-        }
-        blocks.push({ kind: e.type, startTs: e.ts, endTs: events[j - 1].ts, count: j - i, text });
-        i = j;
-        continue;
-      }
-      if (e.type === "tool") {
-        const block = { kind: "tool", id: e.id, title: e.title, toolKind: e.kind, input: e.input, startTs: e.ts, updates: [] };
-        openTools.set(e.id, block);
-        blocks.push(block);
-        i++;
-        continue;
-      }
-      if (e.type === "toolUpdate") {
-        const block = openTools.get(e.id);
-        if (block) block.updates.push({ status: e.status, output: e.output, ts: e.ts });
-        else blocks.push({ kind: "toolUpdateOrphan", raw: e });
-        i++;
-        continue;
-      }
-      blocks.push({ kind: e.type, raw: e });
-      i++;
-    }
-
-    const lines = [];
-    const push = (s = "") => lines.push(s);
-    const rule = (ch = "=") => ch.repeat(72);
-
-    // ---------------- header ----------------
-    push(rule());
-    push("LakshX Diagnostic Session Report");
-    push(rule());
-    push(`Workspace:        ${workspace}`);
-    push(`Chat title:       ${this.chatTitle ?? "(untitled)"}`);
-    push(`Chat id:          ${this.chatId}`);
-    push(`Session id:       ${this.sessionId ?? "(none)"}`);
-    push(`Current model:    ${this.currentModel ?? "(unknown)"}`);
-    const modes = new Set([this.mode]);
-    for (const e of events) if (e.type === "modeChanged") modes.add(e.mode);
-    push(`Mode(s) used:     ${[...modes].join(", ")}`);
-    push(`Session started:  ${hasTs ? fmtAbs(firstTs) : "unknown (session predates diagnostic timestamps)"}`);
-    push(`Report generated: ${new Date(now).toISOString()}`);
-    push(`Total duration:   ${hasTs ? fmtDur((lastTs ?? now) - firstTs) : "unknown"}`);
-    push(`Total events:     ${events.length}`);
-
-    // ---------------- stuck/incomplete-turn detection ----------------
-    // A hung turn never posts turnEnd (server.ts only posts it after
-    // session/prompt resolves — see sendPrompt in this file), so the
-    // transcript just stops. Same signature for a tool call with no
-    // matching toolUpdate. Surface both explicitly rather than making
-    // whoever reads this infer it from a chronology that just ends.
-    const warnings = [];
-    let openUserTs = null;
-    for (const e of events) {
-      if (e.type === "user") openUserTs = e.ts;
-      if (e.type === "turnEnd") openUserTs = null;
-    }
-    if (openUserTs != null) {
-      warnings.push(
-        `The last turn never completed (no turnEnd event) — stuck for ${hasTs ? fmtDur(now - openUserTs) : "unknown"}.`,
-      );
-    }
-    for (const b of blocks) {
-      if (b.kind === "tool" && b.updates.length === 0) {
-        warnings.push(`Tool call "${b.title}" (id ${b.id}) started at ${fmtAbs(b.startTs)} and never returned (no toolUpdate).`);
-      }
-    }
-    if (blocks.length) {
-      const last = blocks[blocks.length - 1];
-      if (last.kind === "thought") {
-        warnings.push(
-          `Session ends mid-THINKING (${last.count} thought chunk(s), last at ${fmtAbs(last.endTs)}) with no further activity — the "stuck at thinking" signature.`,
-        );
-      }
-    }
-    if (warnings.length) {
-      push("");
-      push(rule("-"));
-      push("ANOMALIES DETECTED");
-      push(rule("-"));
-      for (const w of warnings) push(`  - ${w}`);
-    }
-
-    push("");
-    push(
-      "NOTE: tool call OUTPUT is capped at 4000 characters upstream (agent/src/server.ts onToolEnd,",
-    );
-    push(
-      "shared with the live tool-call card) before it ever reaches this transcript — this report",
-    );
-    push(
-      "cannot show more than that. Thinking and assistant text are NOT capped and appear in full below.",
-    );
-
-    push("");
-    push(rule());
-    push("CHRONOLOGICAL EVENT LOG");
-    push(rule());
-
-    for (const b of blocks) {
-      push("");
-      switch (b.kind) {
-        case "thought":
-          push(`${tag(b.startTs)} THINKING  (${b.count} chunk(s), duration ${fmtDur(b.endTs - b.startTs)})`);
-          push(rule("-").slice(0, 50));
-          push(b.text || "(empty)");
-          break;
-        case "chunk":
-          push(`${tag(b.startTs)} ASSISTANT TEXT  (${b.count} chunk(s), duration ${fmtDur(b.endTs - b.startTs)})`);
-          push(rule("-").slice(0, 50));
-          push(b.text || "(empty)");
-          break;
-        case "tool": {
-          const last = b.updates[b.updates.length - 1];
-          push(`${tag(b.startTs)} TOOL CALL: ${b.title}  (id: ${b.id}, kind: ${b.toolKind ?? "?"})`);
-          push(rule("-").slice(0, 50));
-          push("Input:");
-          push(indentBlock(safeJson(b.input)));
-          if (last) {
-            push(`Result (${last.status}, duration ${fmtDur(last.ts - b.startTs)}):`);
-            push(indentBlock(last.output ?? "(no output text)"));
-            if (b.updates.length > 1) push(`(${b.updates.length} status updates received; showing the final one)`);
-          } else {
-            push("Result: *** NEVER RETURNED — no toolUpdate event followed this call ***");
-          }
-          break;
-        }
-        case "toolUpdateOrphan":
-          push(`${tag(b.raw.ts)} TOOL RESULT (no matching tool-call event in this transcript): id ${b.raw.id}, status ${b.raw.status}`);
-          push(indentBlock(b.raw.output ?? ""));
-          break;
-        case "user":
-          push(`${tag(b.raw.ts)} USER PROMPT`);
-          push(rule("-").slice(0, 50));
-          push(b.raw.text ?? "");
-          break;
-        case "system":
-          push(`${tag(b.raw.ts)} SYSTEM NOTICE`);
-          push(`  ${b.raw.text ?? ""}`);
-          break;
-        case "modeChanged":
-          push(`${tag(b.raw.ts)} MODE CHANGED -> ${b.raw.mode}${b.raw.auto ? " (auto)" : " (user)"}`);
-          break;
-        case "turnEnd":
-          push(`${tag(b.raw.ts)} TURN END  (stopReason: ${b.raw.stopReason ?? "?"})`);
-          break;
-        case "checkpoint":
-          push(`${tag(b.raw.ts)} CHECKPOINT  tool: ${b.raw.toolName}, sha: ${b.raw.sha}`);
-          push(`  files: ${(b.raw.files ?? []).join(", ")}`);
-          break;
-        case "checkpointReverted":
-          push(`${tag(b.raw.ts)} CHECKPOINT REVERTED`);
-          push(`  files: ${(b.raw.paths ?? []).join(", ")}`);
-          break;
-        case "subagentsStart":
-          push(`${tag(b.raw.ts)} SUBAGENTS START  batch ${b.raw.batchId}`);
-          push(`  tasks: ${(b.raw.tasks ?? []).map((t) => t.id ?? t).join(", ")}`);
-          break;
-        case "subagentActivity":
-          push(
-            `${tag(b.raw.ts)} SUBAGENT ACTIVITY  batch ${b.raw.batchId}, task ${b.raw.taskId}, kind ${b.raw.kind}${b.raw.isError ? " (ERROR)" : ""}`,
-          );
-          push(`  ${b.raw.detail ?? ""}${b.raw.path ? ` (${b.raw.path})` : ""}`);
-          break;
-        case "subagentsEnd":
-          push(`${tag(b.raw.ts)} SUBAGENTS END  batch ${b.raw.batchId}`);
-          push(indentBlock(safeJson(b.raw.results)));
-          break;
-        default:
-          push(`${tag(b.raw?.ts)} ${String(b.kind).toUpperCase()}`);
-          push(indentBlock(safeJson(b.raw)));
-      }
-    }
-
-    push("");
-    push(rule());
-    push("END OF REPORT");
-    push(rule());
-    return lines.join("\n");
+    return diagnostics.buildDiagnosticReport({
+      transcript: this.transcript,
+      workspace,
+      chatTitle: this.chatTitle,
+      chatId: this.chatId,
+      sessionId: this.sessionId,
+      currentModel: this.currentModel,
+      mode: this.mode,
+    });
   }
 
   async onWebviewMessage(m) {

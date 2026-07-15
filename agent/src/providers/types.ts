@@ -64,14 +64,62 @@ export function streamIdleMs(): number {
   return Number.isFinite(v) && v > 0 ? v : 45_000;
 }
 
+/**
+ * Hard ceiling on a SINGLE `sseLines()` stream's total wall-clock duration,
+ * in ms, regardless of how much data is still arriving. Overridable for
+ * tests via `LAKSHX_STREAM_MAX_MS`.
+ *
+ * Complements (does not replace) `streamIdleMs()`: the idle timer only
+ * fires on SILENCE, so it never catches a model that keeps emitting
+ * `thinking_delta`/`reasoning_content` tokens continuously without ever
+ * going idle — a genuine reasoning loop that never stops is, from the idle
+ * timer's point of view, indistinguishable from a healthy long generation,
+ * because bytes never stop arriving. This is exactly the "stuck at
+ * thinking" report this timeout exists to catch: the session isn't dead,
+ * it's just never finishing.
+ *
+ * 10 minutes default: comfortably above any realistic single generation —
+ * even a generous extended-thinking budget plus an 8k-token response
+ * finishes in well under a minute at typical provider throughput — while
+ * still bounded, so a runaway stream fails loudly (via the same
+ * `session/prompt` error path idle timeouts already use) instead of
+ * hanging the UI forever. A multi-tool-call turn is unaffected: each
+ * `adapter.runTurn()` call gets its own fresh `sseLines()` (and thus its
+ * own fresh 10-minute budget) per loop iteration, so this bounds a single
+ * generation span, not the whole agentic turn.
+ */
+export function streamMaxMs(): number {
+  const v = Number(process.env.LAKSHX_STREAM_MAX_MS);
+  return Number.isFinite(v) && v > 0 ? v : 10 * 60_000;
+}
+
 /** Minimal SSE line parser shared by both adapters. */
 export async function* sseLines(
   body: ReadableStream<Uint8Array>,
   idleMs: number = streamIdleMs(),
+  maxMs: number = streamMaxMs(),
 ): AsyncGenerator<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
+  // One deadline for the WHOLE stream, armed once and reused across every
+  // iteration of the read loop below — unlike the idle timer (which resets
+  // on every byte received), this keeps counting down regardless of how
+  // much data keeps arriving, so a continuously-streaming-but-never-done
+  // connection still gets cut off.
+  let maxTimer: ReturnType<typeof setTimeout> | undefined;
+  const maxDeadline = new Promise<never>((_, reject) => {
+    maxTimer = setTimeout(
+      () =>
+        reject(
+          new Error(
+            `provider stream exceeded max duration of ${maxMs}ms while still receiving data — ` +
+              `likely a runaway/continuous generation (e.g. thinking that never stops), not a stalled connection`,
+          ),
+        ),
+      maxMs,
+    );
+  });
   try {
     for (;;) {
       let timer: ReturnType<typeof setTimeout>;
@@ -83,7 +131,7 @@ export async function* sseLines(
       });
       let done: boolean, value: Uint8Array | undefined;
       try {
-        ({ done, value } = await Promise.race([reader.read(), idle]));
+        ({ done, value } = await Promise.race([reader.read(), idle, maxDeadline]));
       } finally {
         clearTimeout(timer!);
       }
@@ -97,8 +145,10 @@ export async function* sseLines(
       }
     }
   } finally {
-    // on early exit (idle timeout, break, or the consumer stopping
-    // iteration) release the underlying connection instead of leaking it
+    clearTimeout(maxTimer);
+    // on early exit (idle timeout, max-duration timeout, break, or the
+    // consumer stopping iteration) release the underlying connection
+    // instead of leaking it
     await reader.cancel().catch(() => {});
   }
 }

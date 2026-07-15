@@ -42,6 +42,8 @@ export class FakeOpenAI {
   // populates a non-zero entry.
   private scriptDelays: number[] = [];
   private stallScript: ScriptedTurn[] = [];
+  private continuousScript: Array<{ intervalMs: number; factory: (i: number) => SseEvent }> = [];
+  private activeIntervals: Set<ReturnType<typeof setInterval>> = new Set();
   private server: Server | undefined;
 
   /** Queue one or more turns; each request consumes one turn FIFO. */
@@ -74,6 +76,20 @@ export class FakeOpenAI {
     this.stallScript.push(events);
   }
 
+  /**
+   * Queue a turn that streams one event every `intervalMs`, forever — never
+   * idle (unlike `enqueueStall`, which goes silent), never `[DONE]`, never
+   * `res.end()`. Simulates a genuine runaway/continuous reasoning loop: the
+   * model keeps emitting tokens without ever stopping, so a pure
+   * silence-based idle timeout never trips. `factory(i)` builds the i-th
+   * event (0-indexed); typically `reasoningDelta(...)` on a loop so the
+   * client sees a real, growing thinking stream. The interval is force-torn
+   * down by `stop()`.
+   */
+  enqueueContinuous(intervalMs: number, factory: (i: number) => SseEvent): void {
+    this.continuousScript.push({ intervalMs, factory });
+  }
+
   async start(): Promise<void> {
     this.server = createServer((req, res) => {
       let body = "";
@@ -95,6 +111,24 @@ export class FakeOpenAI {
           res.writeHead(200, { "content-type": "text/event-stream" });
           for (const ev of stall) res.write(`data: ${JSON.stringify(ev)}\n\n`);
           // deliberately no [DONE], no res.end() — the socket stays open and silent
+          return;
+        }
+
+        const continuous = this.continuousScript.shift();
+        if (continuous) {
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          let i = 0;
+          const handle = setInterval(() => {
+            res.write(`data: ${JSON.stringify(continuous.factory(i))}\n\n`);
+            i++;
+          }, continuous.intervalMs);
+          this.activeIntervals.add(handle);
+          res.on("close", () => {
+            clearInterval(handle);
+            this.activeIntervals.delete(handle);
+          });
+          // deliberately no [DONE], no res.end() — keeps streaming until the
+          // connection is force-closed by stop()
           return;
         }
 
@@ -122,6 +156,8 @@ export class FakeOpenAI {
 
   async stop(): Promise<void> {
     if (!this.server) return;
+    for (const handle of this.activeIntervals) clearInterval(handle);
+    this.activeIntervals.clear();
     // `close()`'s callback only fires once every connection has ended — for
     // a deliberately-stalled (never-closed) connection that would deadlock,
     // so force-close sockets first/concurrently rather than awaiting close()
