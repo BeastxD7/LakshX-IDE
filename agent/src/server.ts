@@ -208,6 +208,40 @@ acp
       return entry;
     };
 
+    // Live tool-input streaming (LoopCallbacks.onToolInputDelta) — throttled
+    // per toolCallId so a fast-typing write_file doesn't flood the wire with
+    // one ACP notification per raw JSON fragment. Leading edge fires
+    // immediately (the FIRST fragment for a given id is what lets the client
+    // create the tool card before the real `tool_call` notification arrives,
+    // which is the whole point of this feature); everything after that is
+    // coalesced to at most one send per THROTTLE_MS, always carrying the
+    // latest value, never a stale intermediate one. Scoped to this one turn
+    // — cleared in the `finally` below so a pending timer can never fire
+    // after `ctx.client` is no longer safe to notify on (turn already
+    // resolved/rejected).
+    const TOOL_DELTA_THROTTLE_MS = 100;
+    const toolDeltaThrottle = new Map<string, { last: number; timer?: NodeJS.Timeout; pending?: unknown }>();
+    const notifyToolInputDelta = (params: { id: string; name: string; field: string; value: string; path?: string }) => {
+      const key = params.id;
+      const payload = { sessionId, toolCallId: params.id, name: params.name, field: params.field, value: params.value, path: params.path };
+      const state = toolDeltaThrottle.get(key);
+      if (!state) {
+        toolDeltaThrottle.set(key, { last: Date.now() });
+        void ctx.client.notify("lakshx/tool_input_delta", payload);
+        return;
+      }
+      state.pending = payload;
+      if (state.timer) return;
+      const wait = Math.max(0, TOOL_DELTA_THROTTLE_MS - (Date.now() - state.last));
+      state.timer = setTimeout(() => {
+        state.last = Date.now();
+        state.timer = undefined;
+        const p = state.pending;
+        state.pending = undefined;
+        if (p) void ctx.client.notify("lakshx/tool_input_delta", p);
+      }, wait);
+    };
+
     let finalText = "";
     try {
       const stop = await runPrompt(
@@ -222,7 +256,26 @@ acp
             void notify({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: t } }),
           onUsage: (usage) => void ctx.client.notify("lakshx/usage", { sessionId, ...usage }),
           onHistoryChanged: persist,
-          onToolStart: (c) =>
+          onToolStart: (c) => {
+            // The tool is now genuinely dispatching — no more genuine
+            // `onToolInputDelta` fragments can arrive for this id (they only
+            // ever fire during the model's streaming turn, strictly BEFORE
+            // this point in `runPromptLoop`). FLUSH (not discard) any
+            // still-pending throttled fragment first: the last fragment of a
+            // call is very likely still sitting in its coalescing window
+            // right up to this exact moment (this fires within
+            // microseconds of the stream ending), and dropping it would
+            // leave the client's live preview permanently missing the tail
+            // of the value with nothing to ever correct it (unlike title,
+            // which `tool_call`'s own `rawInput` refreshes) — always let the
+            // client see the true final extracted value before/alongside the
+            // official `tool_call`.
+            const pending = toolDeltaThrottle.get(c.id);
+            if (pending) {
+              clearTimeout(pending.timer);
+              toolDeltaThrottle.delete(c.id);
+              if (pending.pending) void ctx.client.notify("lakshx/tool_input_delta", pending.pending);
+            }
             void notify({
               sessionUpdate: "tool_call",
               toolCallId: c.id,
@@ -230,7 +283,8 @@ acp
               kind: c.kind,
               status: "in_progress",
               rawInput: c.input,
-            }),
+            });
+          },
           onToolEnd: (c) =>
             void notify({
               sessionUpdate: "tool_call_update",
@@ -238,6 +292,7 @@ acp
               status: c.isError ? "failed" : "completed",
               content: [{ type: "content", content: { type: "text", text: c.output.slice(0, 4000) } }],
             }),
+          onToolInputDelta: notifyToolInputDelta,
           onPermission: async (c) => {
             const res = await ctx.client.request(acp.methods.client.session.requestPermission, {
               sessionId,
@@ -302,6 +357,10 @@ acp
       return { stopReason: "refusal" };
     } finally {
       if (session.pending === abort) session.pending = undefined;
+      // never let a coalescing timer fire after this turn's `ctx` is done —
+      // any still-pending fragment is moot anyway, since the real `tool_call`
+      // notification (full rawInput) either already landed or never will.
+      for (const state of toolDeltaThrottle.values()) clearTimeout(state.timer);
     }
   })
   // LakshX extension: undo one file to its state before the most recent

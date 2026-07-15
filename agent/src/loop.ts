@@ -23,6 +23,32 @@ export interface LoopCallbacks {
   onThinking(text: string): void;
   onToolStart(call: { id: string; name: string; input: any; kind: ToolSpec["kind"]; title: string }): void;
   onToolEnd(call: { id: string; output: string; isError: boolean }): void;
+  /**
+   * Fired as raw tool-input JSON fragments arrive for a tool call that has
+   * NOT been dispatched yet (docs/research reliability roadmap — live tool
+   * input streaming). Purely a UI-progress signal layered on top of the
+   * existing flow: it must never affect WHEN or WHETHER a tool actually
+   * runs — dispatch still only happens after `adapter.runTurn()` resolves
+   * with the model's full, successfully-parsed `toolCalls` (unchanged,
+   * below); this callback is wired to a SEPARATE accumulation buffer
+   * (`toolInputBuf` in `runPromptLoop`) that the dispatch path never reads.
+   *
+   * Only fired for tool names in `STREAMED_INPUT_FIELDS` — the ones with a
+   * single natural incremental string field worth showing mid-stream
+   * (write_file's `content`, edit_file's `new_string`). A raw half-formed
+   * JSON fragment for e.g. `dispatch_subtasks`'s array-of-objects input, or
+   * `bash`'s already-short `command`, isn't presentable, so those never
+   * trigger this at all — see `extractPartialStringField`'s doc comment for
+   * how the one field IS extracted.
+   *
+   * `value` is the best-effort STRING DECODED SO FAR for that field — grows
+   * monotonically across calls for the same `id` (not a delta, unlike
+   * `onText`/`onThinking`), since a client wants to just replace what it's
+   * showing, not concatenate fragments of an already-non-JSON display value.
+   * `path`, when extractable, lets a client show which file before content
+   * even starts.
+   */
+  onToolInputDelta?(info: { id: string; name: string; field: string; value: string; path?: string }): void;
   /** Ask the client whether a dangerous tool may run. */
   onPermission(call: { id: string; name: string; input: any; title: string; kind: ToolSpec["kind"] }): Promise<boolean>;
   /** Fired after each model call with the provider's reported (or estimated) token usage. */
@@ -210,6 +236,124 @@ export function toolTitle(name: string, input: any): string {
 /** ~3.6 chars/token runs denser than the folk chars/4 estimate for code-heavy text. */
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 3.6);
+}
+
+/**
+ * Tools whose input has exactly one field worth showing as it streams in,
+ * and the name of that field — see `LoopCallbacks.onToolInputDelta`'s doc
+ * comment. Deliberately a short, explicit allowlist rather than "stream
+ * whatever field shows up": `write_file`'s `content` and `edit_file`'s
+ * `new_string` are the only cases where a growing raw string is actually
+ * legible mid-stream. Every other tool (bash's short one-line `command`,
+ * dispatch_subtasks's array-of-objects, grep's short `pattern`) is left out
+ * on purpose — `runPromptLoop` never even attempts extraction for them.
+ */
+const STREAMED_INPUT_FIELDS: Record<string, string> = {
+  write_file: "content",
+  edit_file: "new_string",
+};
+
+/**
+ * Hard cap, in characters of ACCUMULATED raw JSON, past which
+ * `runPromptLoop` stops bothering to re-extract the streamed field for a
+ * given tool call — a UI-progress nicety, not correctness: the real
+ * dispatch path (`spec.run(tc.input ?? {}, ...)`) reads the provider's own
+ * fully-assembled `toolCalls[].input`, entirely unaffected by this cap.
+ * Matches the size-capping discipline elsewhere in this file/tools.ts
+ * (`clip()`'s 60_000, read_file's 48_000) — keeps the O(n) re-scan/re-decode
+ * `extractPartialStringField` does on every fragment (see its doc comment)
+ * bounded even for a pathologically large generated file.
+ */
+const MAX_TOOL_INPUT_STREAM_CHARS = 50_000;
+
+/** Cap an in-progress live-preview value to its last `max` chars — showing the TAIL (what was just typed), not the head, is what reads naturally for a growing "watch it write" view. */
+function capTail(s: string, max = 4000): string {
+  return s.length > max ? "…" + s.slice(s.length - max) : s;
+}
+
+/**
+ * Best-effort extraction of a string-valued field from a flat, possibly
+ * still-incomplete JSON object being streamed key-by-key — exactly the
+ * shape `write_file`/`edit_file`'s inputs are (`{"path": "...", "content":
+ * "..."}` / `{"path": "...", "old_string": "...", "new_string": "..."}`,
+ * all string values, no nesting). This is NOT a general partial-JSON
+ * parser — it doesn't need to be, since both target fields are always the
+ * top-level object's own string properties.
+ *
+ * Returns `undefined` until the field's key AND its value's opening quote
+ * have both arrived. Once the value has started, returns the best-effort
+ * UNESCAPED string decoded so far — naturally grows on every call as more
+ * of the buffer arrives — stopping decode at whatever's cleanly resolvable
+ * (a trailing lone `\` or an incomplete `\uXXXX` at the very end of the
+ * buffer means "more is coming," not "malformed": decoding simply stops
+ * there for this call and picks up again once the rest of the escape
+ * arrives in a later one).
+ *
+ * Known best-effort limitation (acceptable — this is a UI preview, not the
+ * dispatch path): the "must be preceded by `{` or `,`" check below guards
+ * against MOST accidental matches of the key text appearing inside an
+ * earlier field's string value, but not all — e.g. if `edit_file`'s
+ * `old_string` value itself contains the literal text `, "new_string":`,
+ * this can still latch onto it early. The real `new_string` value (parsed
+ * from the provider's fully-assembled JSON once the turn completes) is
+ * never affected either way.
+ */
+export function extractPartialStringField(json: string, field: string): string | undefined {
+  const key = `"${field}"`;
+  let searchFrom = 0;
+  for (;;) {
+    const keyIdx = json.indexOf(key, searchFrom);
+    if (keyIdx === -1) return undefined;
+    let p = keyIdx - 1;
+    while (p >= 0 && /\s/.test(json[p])) p--;
+    if (p >= 0 && json[p] !== "{" && json[p] !== ",") {
+      searchFrom = keyIdx + key.length;
+      continue; // not a top-level key position — likely inside another field's string value
+    }
+
+    let i = keyIdx + key.length;
+    while (i < json.length && /\s/.test(json[i])) i++;
+    if (i >= json.length) return undefined; // key arrived, colon hasn't yet
+    if (json[i] !== ":") return undefined; // shouldn't happen for well-formed input, but don't misparse
+    i++;
+    while (i < json.length && /\s/.test(json[i])) i++;
+    if (i >= json.length) return undefined; // value hasn't started
+    if (json[i] !== '"') return undefined; // not a string value (or truncated exactly at the quote)
+    i++;
+
+    let out = "";
+    while (i < json.length) {
+      const c = json[i];
+      if (c === '"') return out; // value closed — complete
+      if (c === "\\") {
+        const next = json[i + 1];
+        if (next === undefined) return out; // dangling escape at buffer end — more coming, stop cleanly here
+        switch (next) {
+          case "n": out += "\n"; break;
+          case "t": out += "\t"; break;
+          case "r": out += "\r"; break;
+          case '"': out += '"'; break;
+          case "\\": out += "\\"; break;
+          case "/": out += "/"; break;
+          case "b": out += "\b"; break;
+          case "f": out += "\f"; break;
+          case "u": {
+            const hex = json.slice(i + 2, i + 6);
+            if (hex.length < 4) return out; // incomplete unicode escape — stop, more coming
+            out += String.fromCharCode(parseInt(hex, 16));
+            i += 6;
+            continue;
+          }
+          default: out += next;
+        }
+        i += 2;
+        continue;
+      }
+      out += c;
+      i++;
+    }
+    return out; // ran out of buffer mid-string — value still growing
+  }
 }
 
 function wrapToolOutput(name: string, path: string | undefined, content: string): string {
@@ -510,6 +654,34 @@ async function runPromptLoop(
       input: { system: summarizeText(prompt, 2000), messageCount: session.history.length },
     });
 
+    // Per-iteration accumulation for live tool-input streaming (UI progress
+    // only — see `LoopCallbacks.onToolInputDelta`'s doc comment). Keyed by
+    // the provider's own `index` (both adapters already track in-flight
+    // tool_use blocks that way), reset every iteration since indices are
+    // only meaningful within a single `runTurn()` call. Entirely separate
+    // from `result.toolCalls` (the provider's own fully-assembled input) —
+    // this buffer is read-only-for-display and never touches dispatch.
+    const toolInputBuf = new Map<number, { id: string; name: string; json: string; lastEmitted?: string }>();
+    const onToolInputDelta = cb.onToolInputDelta
+      ? (ev: { index: number; id: string; name: string; delta: string }) => {
+          const buf = toolInputBuf.get(ev.index) ?? { id: ev.id, name: ev.name, json: "" };
+          if (ev.id) buf.id = ev.id;
+          if (ev.name) buf.name = ev.name;
+          buf.json += ev.delta;
+          toolInputBuf.set(ev.index, buf);
+
+          const field = STREAMED_INPUT_FIELDS[buf.name];
+          if (!field || buf.json.length > MAX_TOOL_INPUT_STREAM_CHARS) return;
+          const value = extractPartialStringField(buf.json, field);
+          if (value === undefined) return;
+          const capped = capTail(value);
+          if (capped === buf.lastEmitted) return; // nothing new to show since the last emit
+          buf.lastEmitted = capped;
+          const path = extractPartialStringField(buf.json, "path");
+          cb.onToolInputDelta!({ id: buf.id, name: buf.name, field, value: capped, path });
+        }
+      : undefined;
+
     let result;
     try {
       result = await adapter.runTurn({
@@ -520,6 +692,7 @@ async function runPromptLoop(
         signal,
         onText: cb.onText,
         onThinking: cb.onThinking,
+        onToolInputDelta,
       });
     } catch (err) {
       generation.end({ isError: true, output: summarizeText(String((err as any)?.message ?? err)) });

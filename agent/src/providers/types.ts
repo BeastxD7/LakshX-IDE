@@ -39,6 +39,28 @@ export interface TurnRequest {
   onText?: (text: string) => void;
   /** streamed reasoning/thinking deltas, when the model emits them */
   onThinking?: (text: string) => void;
+  /**
+   * Streamed raw JSON fragments for a `tool_use` block's `input`, as the
+   * provider assembles it on the wire — Anthropic's `input_json_delta`
+   * (`ev.delta.partial_json`) / OpenAI-compat's `delta.tool_calls[].function.
+   * arguments` chunks. Mirrors `onText`/`onThinking`: each call carries only
+   * the new FRAGMENT, not the running total — a consumer that wants the
+   * accumulated JSON-so-far must concatenate these itself, keyed by `index`
+   * (stable within one `runTurn()` call, the same index both adapters already
+   * use internally to track in-flight tool_use blocks).
+   *
+   * `id`/`name` are whatever the provider has revealed so far for this block
+   * — Anthropic always has both from the very first delta (its
+   * `content_block_start` carries them); OpenAI-compat may still have `id:
+   * ""` on an early fragment if a provider defers sending the call id, so a
+   * consumer correlating by id should tolerate it arriving empty on the
+   * first call and populated on a later one for the same `index`.
+   *
+   * Purely a UI-progress signal — the provider's own tool-call assembly
+   * (`toolCalls` in the resolved `TurnResult`) is entirely unaffected by
+   * whether this is wired up or not.
+   */
+  onToolInputDelta?: (ev: { index: number; id: string; name: string; delta: string }) => void;
 }
 
 export interface ChatAdapter {

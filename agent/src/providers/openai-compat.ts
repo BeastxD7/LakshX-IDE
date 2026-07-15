@@ -70,7 +70,19 @@ export class OpenAICompatAdapter implements ChatAdapter {
         if (tc.id) slot.id = tc.id;
         // assign once: some providers resend the full name on every delta
         if (tc.function?.name && !slot.name) slot.name = tc.function.name;
-        if (tc.function?.arguments) slot.args += tc.function.arguments;
+        if (tc.function?.arguments) {
+          slot.args += tc.function.arguments;
+          // `slot.id` may still be "" here if this provider defers sending the
+          // call id past the first chunk — matches the fallback `toolCalls`
+          // gets below (`c.id || \`call_${i}\``) so a consumer correlating by
+          // id doesn't end up with two different keys for the same call.
+          req.onToolInputDelta?.({
+            index: tc.index,
+            id: slot.id || `call_${tc.index}`,
+            name: slot.name,
+            delta: tc.function.arguments,
+          });
+        }
       }
       if (choice.finish_reason) finish = choice.finish_reason;
     }

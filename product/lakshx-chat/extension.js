@@ -565,6 +565,7 @@ class AgentViewProvider {
         if (method === "lakshx/subagents_start") this.onSubagentsStart(params);
         if (method === "lakshx/subagent_activity") this.onSubagentActivity(params);
         if (method === "lakshx/subagents_end") this.onSubagentsEnd(params);
+        if (method === "lakshx/tool_input_delta") this.onToolInputDelta(params);
       },
       onRequest: async (method, params) => {
         if (method === "session/request_permission") return this.onPermissionRequest(params);
@@ -669,6 +670,22 @@ class AgentViewProvider {
 
   onSubagentsEnd(params) {
     this.post({ type: "subagentsEnd", batchId: params.batchId, results: params.results });
+  }
+
+  /**
+   * `lakshx/tool_input_delta` (agent/src/loop.ts's `onToolInputDelta` — live
+   * tool-input streaming, throttled server-side) — deliberately NOT added to
+   * REPLAYABLE: this is a live-only "watch it type" affordance, not part of
+   * the durable transcript. The `tool` event (already REPLAYABLE, already
+   * carries full `rawInput`) is the record a reload/replay reconstructs the
+   * card from; persisting every throttled fragment too would bloat the
+   * per-chat JSON file for no benefit (a replayed transcript shows the
+   * FINISHED tool call, never the typing animation). `post()` still reaches
+   * the live webview and any paired Remote Access phone the normal way —
+   * only the `REPLAYABLE`/persist-to-disk path is skipped.
+   */
+  onToolInputDelta(params) {
+    this.post({ type: "toolInputDelta", id: params.toolCallId, name: params.name, field: params.field, value: params.value, path: params.path });
   }
 
   /**

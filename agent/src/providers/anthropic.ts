@@ -57,6 +57,8 @@ export class AnthropicAdapter implements ChatAdapter {
             req.onThinking?.(ev.delta.thinking);
           } else if (ev.delta?.type === "input_json_delta" && partialJson[ev.index]) {
             partialJson[ev.index].json += ev.delta.partial_json;
+            const p = partialJson[ev.index];
+            req.onToolInputDelta?.({ index: ev.index, id: p.id, name: p.name, delta: ev.delta.partial_json });
           }
           break;
         case "content_block_stop":

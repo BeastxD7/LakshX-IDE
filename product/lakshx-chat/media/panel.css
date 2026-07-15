@@ -190,13 +190,19 @@ html, body {
 /* ---------- tools ---------- */
 .tool {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  gap: 4px;
   border-left: 2px solid var(--hairline);
   padding: 3px 10px;
   font-size: 11.5px;
   color: var(--muted);
   animation: rise 0.14s var(--ease);
+}
+.tool-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 .tool .dot {
   width: 6px;
@@ -216,6 +222,28 @@ html, body {
   white-space: nowrap;
   font-family: var(--mono);
 }
+/* Live tool-input preview (write_file's `content` / edit_file's `new_string`
+   growing in place while the model is still generating the call — see
+   panel.js's `applyToolInputDelta`). Same monospace/muted/scrollable
+   treatment as `.thought .tbody`, just more compact (a tool card, not a
+   full thinking bubble) and left-indented to sit under the dot+title row. */
+.tool-preview {
+  margin-left: 14px;
+  padding: 4px 8px;
+  border-left: 1px solid var(--hairline);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--faint);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 140px;
+  overflow-y: auto;
+}
+/* A card created from a delta before the real `tool_call` notification has
+   landed yet — same look as "running", `.pending` exists only as a hook in
+   case a future style wants to distinguish "guessed title" from confirmed. */
+.tool.pending .title { opacity: 0.85; }
 
 /* ---------- checkpoints: "Files changed" card + undo (docs/research/11 §7) ---------- */
 /* Reuses the .tool card's visual language (left hairline border, muted color,

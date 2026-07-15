@@ -143,15 +143,73 @@ function collapseThought() {
 
 // ---------- tools ----------
 const tools = new Map();
+function toolCardTemplate() {
+  const el = document.createElement("div");
+  el.innerHTML = `<div class="tool-head"><span class="dot"></span><span class="title"></span></div><div class="tool-preview" hidden></div>`;
+  return el;
+}
 function addTool(t) {
   endStream();
-  const el = document.createElement("div");
-  el.className = "tool running";
-  el.innerHTML = `<span class="dot"></span><span class="title"></span>`;
-  el.querySelector(".title").textContent = t.title;
-  messagesEl.appendChild(el);
-  tools.set(t.id, el);
+  // A `toolInputDelta` (below) may already have rendered a placeholder card
+  // for this SAME id before the model's turn even finished streaming — this
+  // is the real, dispatch-authoritative "tool" event catching up. Reuse it
+  // in place (same DOM position, same live-typed preview still visible)
+  // rather than appending a second, duplicate card.
+  let el = tools.get(t.id);
+  if (el) {
+    el.className = "tool running";
+    el.querySelector(".title").textContent = t.title;
+  } else {
+    el = toolCardTemplate();
+    el.className = "tool running";
+    el.querySelector(".title").textContent = t.title;
+    messagesEl.appendChild(el);
+    tools.set(t.id, el);
+  }
   scrollBottom();
+}
+
+/**
+ * `toolInputDelta` (agent/src/loop.ts's `onToolInputDelta`, throttled
+ * server-side in server.ts) — live tool-input streaming, fired for a tool
+ * call that has NOT been dispatched yet: `write_file`'s `content` growing,
+ * `edit_file`'s `new_string` growing. This is what lets the tool card appear
+ * and its preview grow WHILE the model is still generating the call, instead
+ * of only after the whole thing lands (the gap this feature closes). Never
+ * replayed (see extension.js's `onToolInputDelta` doc comment) — a reload
+ * just shows the finished `tool`/`toolUpdate` card, same as before this
+ * feature existed.
+ *
+ * Creates the SAME kind of `.tool` card `addTool()` does, keyed by the same
+ * `id`, so whichever arrives first (this, almost always) or `addTool()`
+ * (if the model's whole turn — including the tool call — streamed faster
+ * than one throttle window) reconciles cleanly with the other.
+ */
+function applyToolInputDelta(m) {
+  clearEmpty();
+  endStream();
+  let el = tools.get(m.id);
+  if (!el) {
+    el = toolCardTemplate();
+    el.className = "tool running pending";
+    el.querySelector(".title").textContent = toolInputDeltaTitle(m);
+    messagesEl.appendChild(el);
+    tools.set(m.id, el);
+  } else if (m.path) {
+    el.querySelector(".title").textContent = toolInputDeltaTitle(m);
+  }
+  if (m.value) {
+    const preview = el.querySelector(".tool-preview");
+    preview.hidden = false;
+    preview.textContent = m.value;
+    preview.scrollTop = preview.scrollHeight;
+  }
+  scrollBottom();
+}
+
+function toolInputDeltaTitle(m) {
+  const label = m.name === "write_file" ? "Write" : m.name === "edit_file" ? "Edit" : m.name;
+  return m.path ? `${label} ${m.path}` : label;
 }
 
 // ---------- prompt checkpoints + "Files changed" undo (docs/research/11 §7) ----------
@@ -413,7 +471,13 @@ function renderSubagentRowBody(row, card) {
     const el = document.createElement("div");
     if (entry.kind === "tool") {
       el.className = `tool ${entry.status}`;
-      el.innerHTML = `<span class="dot"></span><span class="title"></span>`;
+      // `.tool` is a shared class — since `addTool()`/`applyToolInputDelta()`
+      // wrap dot+title in `.tool-head` (so a `.tool-preview` can sit below
+      // it), every `.tool` card must, or `.tool`'s `flex-direction: column`
+      // stacks a flat dot+title vertically instead of inline. This row never
+      // gets a live input preview (subagent activity isn't wired to
+      // `onToolInputDelta`), but still needs the same wrapper for layout.
+      el.innerHTML = `<div class="tool-head"><span class="dot"></span><span class="title"></span></div>`;
       el.querySelector(".title").textContent = entry.title;
     } else {
       el.className = entry.kind === "thinking" ? "sa-entry sa-entry-thinking" : "sa-entry sa-entry-text";
@@ -1203,6 +1267,10 @@ window.addEventListener("message", (e) => {
     case "tool":
       document.getElementById("thinking")?.remove();
       addTool(m);
+      break;
+    case "toolInputDelta":
+      document.getElementById("thinking")?.remove();
+      applyToolInputDelta(m);
       break;
     case "toolUpdate": applyEvent(m, false); break;
     case "modeChanged": applyEvent(m, false); break;
