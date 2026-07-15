@@ -6,6 +6,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { CHANGELOG } = require("./changelog.js");
 
 // ---------- minimal ACP (JSON-RPC over ndjson/stdio) client ----------
 class AcpClient {
@@ -329,6 +330,22 @@ function chatsDir() {
   const dir = path.join(os.homedir(), ".koder", "chats");
   fs.mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+// ---------- "What's new" changelog (see changelog.js) ----------
+// Newest-first, stable within a date (Array#sort is stable) so the curated
+// order in changelog.js — most user-visible entry first per date — survives.
+function sortedChangelog() {
+  return [...CHANGELOG].sort((a, b) => b.date.localeCompare(a.date));
+}
+
+// "Have there been entries shipped after the user last opened the panel?"
+// Empty-string lastSeen (never opened) sorts before every real date, so a
+// first-time user correctly sees the badge.
+function whatsNewHasUnseen(context) {
+  const lastSeen = context.globalState.get("koder.whatsNew.lastSeenDate", "");
+  const newest = sortedChangelog()[0]?.date ?? "";
+  return newest > lastSeen;
 }
 
 // ---------- local feedback log (~/.koder/feedback/<yyyy-mm>.jsonl) ----------
@@ -1030,6 +1047,16 @@ class AgentViewProvider {
       case "history":
         this.view?.webview.postMessage({ type: "historyList", chats: this.listChats() });
         break;
+      case "whatsNew": {
+        const entries = sortedChangelog();
+        this.view?.webview.postMessage({ type: "whatsNewList", entries });
+        // Clear the badge: mark everything up to the newest shipped entry as
+        // seen (not "today") so a later addUnseen check compares dates the
+        // same way whatsNewHasUnseen() does above.
+        const newest = entries[0]?.date ?? "";
+        await this.context.globalState.update("koder.whatsNew.lastSeenDate", newest);
+        break;
+      }
       case "loadChat": {
         try {
           const j = JSON.parse(fs.readFileSync(path.join(chatsDir(), `${m.id}.json`), "utf8"));
@@ -1316,6 +1343,13 @@ ${hasMd ? `<link rel="stylesheet" href="${mdcss}">` : ""}
     </div>
     <div class="settings-body" id="historyBody"></div>
   </div>
+  <div id="whatsNewPanel" hidden>
+    <div class="settings-head">
+      <span>What's new</span>
+      <button id="whatsNewClose" class="ghost" title="Close">&#10005;</button>
+    </div>
+    <div class="settings-body" id="whatsNewBody"></div>
+  </div>
   <div id="topbar">
     <div id="modes" role="tablist">
       <button data-mode="review" class="mode active" title="Read-only: research and produce a plan">Review</button>
@@ -1324,6 +1358,9 @@ ${hasMd ? `<link rel="stylesheet" href="${mdcss}">` : ""}
       <button data-mode="royal" class="mode" title="Full autonomy, full machine access — no floor, no restrictions. Logged and checkpointed, not blocked.">Royal</button>
     </div>
     <div class="spacer"></div>
+    <button id="whatsNewBtn" class="ghost${whatsNewHasUnseen(this.context) ? " unseen" : ""}" title="What's new" aria-label="What's new">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.8L20 11l-6.1 2.2L12 19l-1.9-5.8L4 11l6.1-2.2L12 3z"/></svg>
+    </button>
     <button id="historyBtn" class="ghost" title="Chat history" aria-label="Chat history">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/></svg>
     </button>

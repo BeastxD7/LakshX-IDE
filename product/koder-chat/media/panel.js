@@ -797,6 +797,43 @@ function showHistory(chats) {
   historyPanel.hidden = false;
 }
 
+// ---------- what's new ----------
+const whatsNewBtn = document.getElementById("whatsNewBtn");
+const whatsNewPanel = document.getElementById("whatsNewPanel");
+const whatsNewBody = document.getElementById("whatsNewBody");
+whatsNewBtn.addEventListener("click", () => {
+  vscode.postMessage({ type: "whatsNew" });
+});
+document.getElementById("whatsNewClose").addEventListener("click", () => (whatsNewPanel.hidden = true));
+
+function showWhatsNew(entries) {
+  // opening the panel means the extension has already recorded these as
+  // seen (extension.js's "whatsNew" handler) — clear the badge to match
+  whatsNewBtn.classList.remove("unseen");
+  whatsNewBody.innerHTML = entries.length ? "" : `<div class="hint">Nothing new yet.</div>`;
+  let lastDate = null;
+  for (const entry of entries) {
+    if (entry.date !== lastDate) {
+      const heading = document.createElement("div");
+      heading.className = "wn-date";
+      heading.textContent = new Date(`${entry.date}T00:00:00`).toLocaleDateString(undefined, {
+        month: "long",
+        day: "numeric",
+        year: "numeric",
+      });
+      whatsNewBody.appendChild(heading);
+      lastDate = entry.date;
+    }
+    const item = document.createElement("div");
+    item.className = "wn-item";
+    item.innerHTML = `<div class="wn-title"></div><div class="wn-desc"></div>`;
+    item.querySelector(".wn-title").textContent = entry.title;
+    item.querySelector(".wn-desc").textContent = entry.description;
+    whatsNewBody.appendChild(item);
+  }
+  whatsNewPanel.hidden = false;
+}
+
 // ---------- replay (webview rebuilds when hidden) ----------
 function applyEvent(m, replaying) {
   switch (m.type) {
@@ -1045,6 +1082,7 @@ window.addEventListener("message", (e) => {
       break;
     }
     case "historyList": showHistory(m.chats); break;
+    case "whatsNewList": showWhatsNew(m.entries); break;
     case "planReady": showPlanBar(m.path); break;
     case "system": addMsg("system", m.text); break;
     case "addAttachment": addAttachment(m.attachment); break;
