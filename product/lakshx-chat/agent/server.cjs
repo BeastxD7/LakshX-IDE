@@ -18953,10 +18953,25 @@ function streamIdleMs() {
   const v = Number(process.env.LAKSHX_STREAM_IDLE_MS);
   return Number.isFinite(v) && v > 0 ? v : 45e3;
 }
-async function* sseLines(body, idleMs = streamIdleMs()) {
+function streamMaxMs() {
+  const v = Number(process.env.LAKSHX_STREAM_MAX_MS);
+  return Number.isFinite(v) && v > 0 ? v : 10 * 6e4;
+}
+async function* sseLines(body, idleMs = streamIdleMs(), maxMs = streamMaxMs()) {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
+  let maxTimer;
+  const maxDeadline = new Promise((_, reject) => {
+    maxTimer = setTimeout(
+      () => reject(
+        new Error(
+          `provider stream exceeded max duration of ${maxMs}ms while still receiving data \u2014 likely a runaway/continuous generation (e.g. thinking that never stops), not a stalled connection`
+        )
+      ),
+      maxMs
+    );
+  });
   try {
     for (; ; ) {
       let timer;
@@ -18968,7 +18983,7 @@ async function* sseLines(body, idleMs = streamIdleMs()) {
       });
       let done, value;
       try {
-        ({ done, value } = await Promise.race([reader.read(), idle]));
+        ({ done, value } = await Promise.race([reader.read(), idle, maxDeadline]));
       } finally {
         clearTimeout(timer);
       }
@@ -18982,6 +18997,7 @@ async function* sseLines(body, idleMs = streamIdleMs()) {
       }
     }
   } finally {
+    clearTimeout(maxTimer);
     await reader.cancel().catch(() => {
     });
   }
@@ -19046,6 +19062,8 @@ var AnthropicAdapter = class {
             req.onThinking?.(ev.delta.thinking);
           } else if (ev.delta?.type === "input_json_delta" && partialJson[ev.index]) {
             partialJson[ev.index].json += ev.delta.partial_json;
+            const p = partialJson[ev.index];
+            req.onToolInputDelta?.({ index: ev.index, id: p.id, name: p.name, delta: ev.delta.partial_json });
           }
           break;
         case "content_block_stop":
@@ -19144,7 +19162,15 @@ var OpenAICompatAdapter = class {
         const slot = calls[tc.index] ??= { id: "", name: "", args: "" };
         if (tc.id) slot.id = tc.id;
         if (tc.function?.name && !slot.name) slot.name = tc.function.name;
-        if (tc.function?.arguments) slot.args += tc.function.arguments;
+        if (tc.function?.arguments) {
+          slot.args += tc.function.arguments;
+          req.onToolInputDelta?.({
+            index: tc.index,
+            id: slot.id || `call_${tc.index}`,
+            name: slot.name,
+            delta: tc.function.arguments
+          });
+        }
       }
       if (choice.finish_reason) finish = choice.finish_reason;
     }
@@ -19333,8 +19359,7 @@ async function runBrowserPreview(input, cwd, signal) {
       const shotDir = (0, import_node_path6.resolve)(cwd, ".lakshx", "tmp");
       await (0, import_promises2.mkdir)(shotDir, { recursive: true });
       const shotPath = (0, import_node_path6.resolve)(shotDir, `preview-${Date.now()}.png`);
-      await page.screenshot({ path: shotPath }).catch(() => {
-      });
+      const screenshotBuf = await page.screenshot({ path: shotPath }).catch(() => null);
       const lines = [];
       lines.push(`URL: ${targetUrl.toString()}`);
       lines.push(`HTTP status: ${status ?? "(none \u2014 navigation did not complete)"}`);
@@ -19354,10 +19379,15 @@ async function runBrowserPreview(input, cwd, signal) {
       lines.push(
         consoleEntries.length ? consoleEntries.map((e) => `  ${summarizeText(e, MAX_CONSOLE_ENTRY_CHARS)}`).join("\n") : "  (none)"
       );
-      lines.push(`Screenshot saved (for human review, not sent to the model): ${shotPath}`);
+      lines.push(
+        screenshotBuf ? `Screenshot saved (shown to the human in chat, not sent to you): ${shotPath}` : `Screenshot: capture failed \u2014 none saved.`
+      );
       lines.push(`Page text (capped):
 ${summarizeText(pageText, MAX_PAGE_TEXT_CHARS) || "(empty)"}`);
-      return lines.join("\n");
+      return {
+        text: lines.join("\n"),
+        image: screenshotBuf ? { mimeType: "image/png", base64: screenshotBuf.toString("base64"), path: shotPath } : void 0
+      };
     } finally {
       await context.close().catch(() => {
       });
@@ -19628,7 +19658,7 @@ ${out}`;
     name: "browser_preview",
     kind: "execute",
     dangerous: true,
-    description: "Load a LOCALHOST-ONLY dev server or webview you just built in a real browser and get back text signals: HTTP status, page title, console errors/warnings captured during load, whether an optional CSS selector appeared, and a capped chunk of visible page text. A screenshot is also saved to disk under .lakshx/tmp/ for a HUMAN to look at later \u2014 it is NOT shown to you, so don't rely on it to answer visual questions. Only 127.0.0.1, ::1, and localhost URLs are accepted (with any port/path) \u2014 this cannot reach the public internet or any other host, and file:// URLs are rejected outright.",
+    description: "Load a LOCALHOST-ONLY dev server or webview you just built in a real browser and get back text signals: HTTP status, page title, console errors/warnings captured during load, whether an optional CSS selector appeared, and a capped chunk of visible page text. A screenshot is also saved to disk under .lakshx/tmp/ and shown inline to the HUMAN in chat \u2014 it is NOT shown to you, so don't rely on it to answer visual questions; use the text signals above for that. Only 127.0.0.1, ::1, and localhost URLs are accepted (with any port/path) \u2014 this cannot reach the public internet or any other host, and file:// URLs are rejected outright.",
     input_schema: {
       type: "object",
       properties: {
@@ -23909,6 +23939,86 @@ function toolTitle(name, input) {
 function estimateTokens(text) {
   return Math.ceil(text.length / 3.6);
 }
+var STREAMED_INPUT_FIELDS = {
+  write_file: "content",
+  edit_file: "new_string"
+};
+var MAX_TOOL_INPUT_STREAM_CHARS = 5e4;
+function capTail(s, max = 4e3) {
+  return s.length > max ? "\u2026" + s.slice(s.length - max) : s;
+}
+function extractPartialStringField(json2, field) {
+  const key = `"${field}"`;
+  let searchFrom = 0;
+  for (; ; ) {
+    const keyIdx = json2.indexOf(key, searchFrom);
+    if (keyIdx === -1) return void 0;
+    let p = keyIdx - 1;
+    while (p >= 0 && /\s/.test(json2[p])) p--;
+    if (p >= 0 && json2[p] !== "{" && json2[p] !== ",") {
+      searchFrom = keyIdx + key.length;
+      continue;
+    }
+    let i = keyIdx + key.length;
+    while (i < json2.length && /\s/.test(json2[i])) i++;
+    if (i >= json2.length) return void 0;
+    if (json2[i] !== ":") return void 0;
+    i++;
+    while (i < json2.length && /\s/.test(json2[i])) i++;
+    if (i >= json2.length) return void 0;
+    if (json2[i] !== '"') return void 0;
+    i++;
+    let out = "";
+    while (i < json2.length) {
+      const c = json2[i];
+      if (c === '"') return out;
+      if (c === "\\") {
+        const next = json2[i + 1];
+        if (next === void 0) return out;
+        switch (next) {
+          case "n":
+            out += "\n";
+            break;
+          case "t":
+            out += "	";
+            break;
+          case "r":
+            out += "\r";
+            break;
+          case '"':
+            out += '"';
+            break;
+          case "\\":
+            out += "\\";
+            break;
+          case "/":
+            out += "/";
+            break;
+          case "b":
+            out += "\b";
+            break;
+          case "f":
+            out += "\f";
+            break;
+          case "u": {
+            const hex3 = json2.slice(i + 2, i + 6);
+            if (hex3.length < 4) return out;
+            out += String.fromCharCode(parseInt(hex3, 16));
+            i += 6;
+            continue;
+          }
+          default:
+            out += next;
+        }
+        i += 2;
+        continue;
+      }
+      out += c;
+      i++;
+    }
+    return out;
+  }
+}
 function wrapToolOutput(name, path, content) {
   const attrs = path ? ` tool="${name}" path="${scrubSecrets(path)}"` : ` tool="${name}"`;
   const safe = content.replace(/<\/tool_output>/g, "&lt;/tool_output&gt;");
@@ -24037,6 +24147,23 @@ async function runPromptLoop(session, userText, cb, promptId, trace, model, adap
       model,
       input: { system: summarizeText(prompt, 2e3), messageCount: session.history.length }
     });
+    const toolInputBuf = /* @__PURE__ */ new Map();
+    const onToolInputDelta = cb.onToolInputDelta ? (ev) => {
+      const buf = toolInputBuf.get(ev.index) ?? { id: ev.id, name: ev.name, json: "" };
+      if (ev.id) buf.id = ev.id;
+      if (ev.name) buf.name = ev.name;
+      buf.json += ev.delta;
+      toolInputBuf.set(ev.index, buf);
+      const field = STREAMED_INPUT_FIELDS[buf.name];
+      if (!field || buf.json.length > MAX_TOOL_INPUT_STREAM_CHARS) return;
+      const value = extractPartialStringField(buf.json, field);
+      if (value === void 0) return;
+      const capped = capTail(value);
+      if (capped === buf.lastEmitted) return;
+      buf.lastEmitted = capped;
+      const path = extractPartialStringField(buf.json, "path");
+      cb.onToolInputDelta({ id: buf.id, name: buf.name, field, value: capped, path });
+    } : void 0;
     let result;
     try {
       result = await adapter.runTurn({
@@ -24046,7 +24173,8 @@ async function runPromptLoop(session, userText, cb, promptId, trace, model, adap
         tools: allowedTools.map(({ name, description, input_schema }) => ({ name, description, input_schema })),
         signal,
         onText: cb.onText,
-        onThinking: cb.onThinking
+        onThinking: cb.onThinking,
+        onToolInputDelta
       });
     } catch (err) {
       generation.end({ isError: true, output: summarizeText(String(err?.message ?? err)) });
@@ -24165,7 +24293,9 @@ async function runPromptLoop(session, userText, cb, promptId, trace, model, adap
         });
       };
       try {
-        let output = clip(await spec.run(tc.input ?? {}, session.cwd, signal), 6e4);
+        const raw = await spec.run(tc.input ?? {}, session.cwd, signal);
+        const { text: rawOutput, image } = typeof raw === "string" ? { text: raw, image: void 0 } : raw;
+        let output = clip(rawOutput, 6e4);
         const path = tc.input?.path;
         if (tc.name === "edit_file") session.editFails.delete(path);
         if (tc.name === "read_file" && path) session.editFails.delete(path);
@@ -24179,7 +24309,7 @@ async function runPromptLoop(session, userText, cb, promptId, trace, model, adap
         if (session.toolRepeatCount === 2) {
           output += "\n[note: identical call repeated \u2014 the result has not changed; try a different approach]";
         } else if (session.toolRepeatCount >= 4) {
-          cb.onToolEnd({ id: tc.id, output, isError: false });
+          cb.onToolEnd({ id: tc.id, output, isError: false, image });
           toolSpan.end({ output: summarizeText(output), isError: false });
           auditRun(output, false);
           results.push({
@@ -24191,7 +24321,7 @@ async function runPromptLoop(session, userText, cb, promptId, trace, model, adap
           cb.onHistoryChanged?.();
           return "end_turn";
         }
-        cb.onToolEnd({ id: tc.id, output, isError: false });
+        cb.onToolEnd({ id: tc.id, output, isError: false, image });
         toolSpan.end({ output: summarizeText(output), isError: false });
         auditRun(output, false);
         results.push({ type: "tool_result", tool_use_id: tc.id, content: wrapToolOutput(tc.name, path, output) });
@@ -24346,6 +24476,15 @@ function pruneSessions(keepNewest = 200, maxAgeDays = 60) {
   }
 }
 
+// src/tool-image-cap.ts
+var MAX_TOOL_IMAGE_BYTES = 2 * 1024 * 1024;
+function capToolImageBase64(base643, maxBytes = MAX_TOOL_IMAGE_BYTES) {
+  if (base643.length === 0) return base643;
+  const padding = base643.endsWith("==") ? 2 : base643.endsWith("=") ? 1 : 0;
+  const rawBytes = base643.length / 4 * 3 - padding;
+  return rawBytes > maxBytes ? void 0 : base643;
+}
+
 // src/server.ts
 function laterOverlap(checkpoints, promptId) {
   const target = checkpoints.find((c) => c.promptId === promptId);
@@ -24476,6 +24615,28 @@ agent({ name: "lakshx-agent" }).onRequest("initialize", async () => ({
     }
     return entry;
   };
+  const TOOL_DELTA_THROTTLE_MS = 100;
+  const toolDeltaThrottle = /* @__PURE__ */ new Map();
+  const notifyToolInputDelta = (params) => {
+    const key = params.id;
+    const payload = { sessionId, toolCallId: params.id, name: params.name, field: params.field, value: params.value, path: params.path };
+    const state = toolDeltaThrottle.get(key);
+    if (!state) {
+      toolDeltaThrottle.set(key, { last: Date.now() });
+      void ctx.client.notify("lakshx/tool_input_delta", payload);
+      return;
+    }
+    state.pending = payload;
+    if (state.timer) return;
+    const wait = Math.max(0, TOOL_DELTA_THROTTLE_MS - (Date.now() - state.last));
+    state.timer = setTimeout(() => {
+      state.last = Date.now();
+      state.timer = void 0;
+      const p = state.pending;
+      state.pending = void 0;
+      if (p) void ctx.client.notify("lakshx/tool_input_delta", p);
+    }, wait);
+  };
   let finalText = "";
   try {
     const stop = await runPrompt(
@@ -24489,20 +24650,40 @@ agent({ name: "lakshx-agent" }).onRequest("initialize", async () => ({
         onThinking: (t) => void notify({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: t } }),
         onUsage: (usage) => void ctx.client.notify("lakshx/usage", { sessionId, ...usage }),
         onHistoryChanged: persist,
-        onToolStart: (c) => void notify({
-          sessionUpdate: "tool_call",
-          toolCallId: c.id,
-          title: c.title,
-          kind: c.kind,
-          status: "in_progress",
-          rawInput: c.input
-        }),
-        onToolEnd: (c) => void notify({
-          sessionUpdate: "tool_call_update",
-          toolCallId: c.id,
-          status: c.isError ? "failed" : "completed",
-          content: [{ type: "content", content: { type: "text", text: c.output.slice(0, 4e3) } }]
-        }),
+        onToolStart: (c) => {
+          const pending2 = toolDeltaThrottle.get(c.id);
+          if (pending2) {
+            clearTimeout(pending2.timer);
+            toolDeltaThrottle.delete(c.id);
+            if (pending2.pending) void ctx.client.notify("lakshx/tool_input_delta", pending2.pending);
+          }
+          void notify({
+            sessionUpdate: "tool_call",
+            toolCallId: c.id,
+            title: c.title,
+            kind: c.kind,
+            status: "in_progress",
+            rawInput: c.input
+          });
+        },
+        onToolEnd: (c) => {
+          void notify({
+            sessionUpdate: "tool_call_update",
+            toolCallId: c.id,
+            status: c.isError ? "failed" : "completed",
+            content: [{ type: "content", content: { type: "text", text: c.output.slice(0, 4e3) } }]
+          });
+          if (c.image) {
+            void ctx.client.notify("lakshx/tool_image", {
+              sessionId,
+              toolCallId: c.id,
+              mimeType: c.image.mimeType,
+              path: c.image.path,
+              dataBase64: capToolImageBase64(c.image.base64)
+            });
+          }
+        },
+        onToolInputDelta: notifyToolInputDelta,
         onPermission: async (c) => {
           const res = await ctx.client.request(methods.client.session.requestPermission, {
             sessionId,
@@ -24555,6 +24736,7 @@ Error: ${err?.message ?? err}` }
     return { stopReason: "refusal" };
   } finally {
     if (session.pending === abort) session.pending = void 0;
+    for (const state of toolDeltaThrottle.values()) clearTimeout(state.timer);
   }
 }).onRequest(
   "lakshx/undo_file",
