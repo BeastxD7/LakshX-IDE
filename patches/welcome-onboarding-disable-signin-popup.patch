@@ -1,0 +1,26 @@
+diff --git a/src/vs/workbench/contrib/welcomeGettingStarted/browser/gettingStarted.contribution.ts b/src/vs/workbench/contrib/welcomeGettingStarted/browser/gettingStarted.contribution.ts
+index 067580a4..bcf5e9e2 100644
+--- a/src/vs/workbench/contrib/welcomeGettingStarted/browser/gettingStarted.contribution.ts
++++ b/src/vs/workbench/contrib/welcomeGettingStarted/browser/gettingStarted.contribution.ts
+@@ -342,7 +342,20 @@ configurationRegistry.registerConfiguration({
+ 		'workbench.welcomePage.experimentalOnboarding': {
+ 			scope: ConfigurationScope.APPLICATION,
+ 			type: 'boolean',
+-			default: true,
++			// LakshX: default off. This gates a first-launch modal
++			// (OnboardingVariationA, src/vs/workbench/contrib/welcomeOnboarding)
++			// whose first step is a "Sign in to use GitHub Copilot" dialog with
++			// GitHub/Google/Apple buttons — LakshX has no such account system and
++			// doesn't want a sign-in nudge on first run. We considered overriding
++			// this default via a built-in extension's `configurationDefaults`
++			// (the pattern product/koder-ui already uses for other settings,
++			// e.g. chat.disableAIFeatures), but that mechanism populates the
++			// registry asynchronously as extensions are scanned — measured
++			// empirically to lose a startup race under load, letting the
++			// dialog through despite chat.disableAIFeatures=true. Flipping the
++			// schema default itself is synchronous with zero init-ordering
++			// dependency, so it's reliable.
++			default: false,
+ 			tags: ['experimental'],
+ 			description: localize('workbench.welcomePage.experimentalOnboarding', "When enabled, show the new onboarding experience instead of the classic walkthrough on first launch."),
+ 			experiment: {
