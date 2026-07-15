@@ -38,7 +38,13 @@ export const DOWNLOADS: Record<DownloadKey, DownloadTarget> = {
   macArm: {
     label: "macOS (Apple Silicon)",
     shortLabel: "macOS (Apple Silicon)",
-    url: "https://qflnh9roir6uolgc.public.blob.vercel-storage.com/koder/Koder-macOS-arm64.zip",
+    // A real .dmg installer now (drag-to-Applications, matching how every
+    // other macOS app is distributed), not a raw .zip of the app bundle --
+    // built locally via upstream/build/darwin/create-dmg.ts since CI is
+    // currently blocked. See patches/darwin-dmg-title-use-product-name.patch
+    // for a real branding bug found while building this (volume title said
+    // "VS Code" despite the app inside correctly being LakshX.app).
+    url: "https://qflnh9roir6uolgc.public.blob.vercel-storage.com/koder/LakshX-macOS-arm64.dmg",
   },
   macIntel: {
     label: "macOS (Intel)",
