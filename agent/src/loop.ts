@@ -74,9 +74,26 @@ export interface LoopCallbacks {
    *    no separate summarization scheme for subagent tool activity.
    *  - `text`/`thinking`: `summarizeText()` (audit.ts) over the delta, same
    *    size-capping discipline the Royal audit log and tracing spans already
-   *    apply, so an unbounded child response can't flood this channel.
+   *    apply, so an unbounded child response can't flood this channel. Each
+   *    call carries only the DELTA (same granularity as the top-level
+   *    `onText`/`onThinking` streaming callbacks) — a client that wants the
+   *    full running message must accumulate these itself, the same way the
+   *    top-level chat stream does.
+   * `path` is set only for `tool_start`/`tool_end` on `write_file`/
+   * `edit_file` (mirrors how the top-level tool-dispatch loop reads
+   * `tc.input?.path` for those two tools) — lets a client attribute a file
+   * edit to the specific subtask that made it. `isError` is set only for
+   * `tool_end` and mirrors the top-level `onToolEnd`'s `isError`, so a client
+   * can render a failed subtask tool call distinctly from a completed one.
    */
-  onSubagentActivity?(info: { batchId: string; taskId: string; kind: "text" | "thinking" | "tool_start" | "tool_end"; detail: string }): void;
+  onSubagentActivity?(info: {
+    batchId: string;
+    taskId: string;
+    kind: "text" | "thinking" | "tool_start" | "tool_end";
+    detail: string;
+    path?: string;
+    isError?: boolean;
+  }): void;
   /**
    * Fired once when every child in a `dispatch_subtasks` batch has settled —
    * including when one throws, since each child is caught individually (see
@@ -265,12 +282,18 @@ async function runSubtask(
   // carries no title of its own, only id/output/isError) can still report
   // WHAT finished, not just that something did.
   const toolTitles = new Map<string, string>();
+  // toolCallId -> path, same idea, but only populated for write_file/edit_file
+  // (mirrors the top-level tool-dispatch loop's `tc.input?.path` read) — lets
+  // `tool_end` report which file a mutation touched without re-deriving it.
+  const toolPaths = new Map<string, string>();
   const childCb: LoopCallbacks = {
     onText: (text) => cb.onSubagentActivity?.({ batchId, taskId: task.id, kind: "text", detail: summarizeText(text) }),
     onThinking: (text) => cb.onSubagentActivity?.({ batchId, taskId: task.id, kind: "thinking", detail: summarizeText(text) }),
     onToolStart: (c) => {
       toolTitles.set(c.id, c.title);
-      cb.onSubagentActivity?.({ batchId, taskId: task.id, kind: "tool_start", detail: c.title });
+      const path = c.name === "write_file" || c.name === "edit_file" ? c.input?.path : undefined;
+      if (path) toolPaths.set(c.id, path);
+      cb.onSubagentActivity?.({ batchId, taskId: task.id, kind: "tool_start", detail: c.title, path });
     },
     onToolEnd: (c) =>
       cb.onSubagentActivity?.({
@@ -278,6 +301,8 @@ async function runSubtask(
         taskId: task.id,
         kind: "tool_end",
         detail: toolTitles.get(c.id) ?? (c.isError ? "failed" : "done"),
+        path: toolPaths.get(c.id),
+        isError: c.isError,
       }),
     onPermission: (c) => cb.onPermission(c),
     onUsage: cb.onUsage,

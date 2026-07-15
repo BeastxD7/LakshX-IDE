@@ -272,7 +272,22 @@ function handleUndoConflict(m) {
 // body) rather than inventing a new visual style, and `.tool`'s
 // running/done/failed dot-pulse classes for each task row's status dot —
 // same visual vocabulary as the rest of the transcript, not a new one.
-const subagentCards = new Map(); // batchId -> { el, bodyEl, headLabelEl, chevronEl, rows: Map(taskId -> {rowEl, dotEl, detailEl}), total, ended }
+//
+// Each row keeps its own retained activity history (`row.history`), not just
+// "whatever's in the current line" — every `text`/`thinking` chunk is
+// ACCUMULATED into a running message (mirroring `streamRaw`'s pattern, the
+// bug this fixes: `onSubagentActivity`'s `detail` is a streaming DELTA, same
+// granularity as the top-level chat's own `onText`, not the full message —
+// overwriting the row's line with each delta produced a flickering
+// few-word fragment instead of the growing response) and every
+// `tool_start`/`tool_end` becomes its own entry, closing whatever text/
+// thinking message was open (a tool call always ends the message that
+// preceded it, same as `addTool()` calling `endStream()` in the main
+// transcript). Clicking a row expands `row.bodyEl` into a small nested
+// transcript built from that history — `.tool`/`.tool.running/done/failed`
+// rows reused verbatim for tool entries, so a subtask's tool calls read
+// exactly like the parent's own, not a different visual language.
+const subagentCards = new Map(); // batchId -> { el, bodyEl, headLabelEl, chevronEl, rows: Map(taskId -> row), total, ended, promptId }
 
 function applySubagentsStart(m) {
   clearEmpty();
@@ -292,13 +307,46 @@ function applySubagentsStart(m) {
   for (const t of m.tasks ?? []) {
     const row = document.createElement("div");
     row.className = "sa-task";
-    row.innerHTML = `<span class="dot running"></span><div class="sa-task-main"><div class="sa-task-prompt"></div><div class="sa-task-detail"></div></div>`;
+    row.setAttribute("role", "button");
+    row.tabIndex = 0;
+    row.innerHTML = `<span class="dot running"></span><div class="sa-task-main">
+      <div class="sa-task-head"><div class="sa-task-prompt"></div><span class="sa-task-chevron">▸</span></div>
+      <div class="sa-task-detail"></div>
+      <div class="sa-task-body" hidden></div>
+    </div>`;
     row.querySelector(".sa-task-prompt").textContent = t.prompt;
     row.querySelector(".sa-task-detail").textContent = `Starting (${t.mode})…`;
     bodyEl.appendChild(row);
-    rows.set(t.id, { rowEl: row, dotEl: row.querySelector(".dot"), detailEl: row.querySelector(".sa-task-detail") });
+    const rowState = {
+      rowEl: row,
+      dotEl: row.querySelector(".dot"),
+      detailEl: row.querySelector(".sa-task-detail"),
+      bodyEl: row.querySelector(".sa-task-body"),
+      chevronEl: row.querySelector(".sa-task-chevron"),
+      history: [], // ordered {kind:'text'|'thinking', text} | {kind:'tool', title, status, path?}
+      current: null, // the open text/thinking entry, if any (accumulator)
+      runningTool: null, // the open tool entry, if any
+      expanded: false,
+    };
+    const setExpanded = (v) => {
+      rowState.expanded = v;
+      rowState.bodyEl.hidden = !v;
+      rowState.chevronEl.textContent = v ? "▾" : "▸";
+      if (v) renderSubagentRowBody(rowState, card);
+    };
+    row.addEventListener("click", (e) => {
+      if (e.target.closest(".sa-file-path")) return; // file links handle their own click, don't also toggle
+      setExpanded(!rowState.expanded);
+    });
+    row.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        setExpanded(!rowState.expanded);
+      }
+    });
+    rows.set(t.id, rowState);
   }
-  const card = { el, bodyEl, headLabelEl, chevronEl, rows, total: (m.tasks ?? []).length, ended: false };
+  const card = { el, bodyEl, headLabelEl, chevronEl, rows, total: (m.tasks ?? []).length, ended: false, promptId: m.promptId };
   headLabelEl.textContent = `Running ${card.total} subtask${card.total === 1 ? "" : "s"}…`;
   // Expanded while running (so progress is visible without a click); the
   // header is always clickable so a curious user can collapse it early too.
@@ -318,12 +366,99 @@ function applySubagentsStart(m) {
   scrollBottom();
 }
 
+/** Collapsed-row preview line: the live accumulated text/thinking message, the currently-running tool's title, or (once settled) the last thing that happened. Never a raw delta. */
+function renderSubagentRowPreview(row) {
+  if (row.runningTool) {
+    row.detailEl.textContent = `Running: ${row.runningTool.title}`;
+    return;
+  }
+  if (row.current) {
+    row.detailEl.textContent = row.current.text || "…";
+    return;
+  }
+  const last = row.history[row.history.length - 1];
+  if (!last) return;
+  row.detailEl.textContent =
+    last.kind === "tool" ? `${last.status === "failed" ? "Failed" : "Done"}: ${last.title}` : last.text || "";
+}
+
+/** Unique, in-order list of file paths this subtask's tool calls touched (write_file/edit_file only — see loop.ts's `runSubtask`). */
+function subagentRowFiles(row) {
+  const seen = new Set();
+  const files = [];
+  for (const entry of row.history) {
+    if (entry.kind === "tool" && entry.path && !seen.has(entry.path)) {
+      seen.add(entry.path);
+      files.push(entry.path);
+    }
+  }
+  return files;
+}
+
+/** Full nested transcript for an expanded row: chronological text/thinking/tool entries (reusing `.tool`'s exact chrome), plus a "Files touched" list wired into the same click-to-diff path the top-level "Files changed" card uses. */
+function renderSubagentRowBody(row, card) {
+  row.bodyEl.innerHTML = "";
+  for (const entry of row.history) {
+    const el = document.createElement("div");
+    if (entry.kind === "tool") {
+      el.className = `tool ${entry.status}`;
+      el.innerHTML = `<span class="dot"></span><span class="title"></span>`;
+      el.querySelector(".title").textContent = entry.title;
+    } else {
+      el.className = entry.kind === "thinking" ? "sa-entry sa-entry-thinking" : "sa-entry sa-entry-text";
+      el.textContent = entry.text;
+    }
+    row.bodyEl.appendChild(el);
+  }
+  const files = subagentRowFiles(row);
+  if (files.length) {
+    const wrap = document.createElement("div");
+    wrap.className = "sa-files";
+    wrap.innerHTML = `<div class="sa-files-head">Files touched by this subtask (${files.length})</div>`;
+    for (const f of files) {
+      const p = document.createElement("span");
+      p.className = "sa-file-path";
+      p.setAttribute("role", "button");
+      p.tabIndex = 0;
+      p.title = "Open diff";
+      p.textContent = f;
+      p.addEventListener("click", () => openCheckpointFile(card.promptId, f));
+      wrap.appendChild(p);
+    }
+    row.bodyEl.appendChild(wrap);
+  }
+}
+
 function applySubagentActivity(m) {
   const card = subagentCards.get(m.batchId);
   if (!card) return;
   const row = card.rows.get(m.taskId);
   if (!row) return;
-  row.detailEl.textContent = m.detail || "";
+  if (m.kind === "text" || m.kind === "thinking") {
+    // Accumulate into the currently-open message of the same kind — the fix
+    // for the flickering-fragment bug: `m.detail` is only a delta, so a
+    // fresh entry is opened once (on the first delta, or right after a tool
+    // call closed the previous one) and every subsequent delta is appended,
+    // never used to replace the line outright.
+    if (!row.current || row.current.kind !== m.kind) {
+      row.current = { kind: m.kind, text: "" };
+      row.history.push(row.current);
+    }
+    row.current.text += m.detail || "";
+  } else if (m.kind === "tool_start") {
+    row.current = null; // a tool call always closes whatever message preceded it
+    const entry = { kind: "tool", title: m.detail || "", status: "running", path: m.path };
+    row.history.push(entry);
+    row.runningTool = entry;
+  } else if (m.kind === "tool_end") {
+    if (row.runningTool) {
+      row.runningTool.status = m.isError ? "failed" : "done";
+      if (m.path) row.runningTool.path = m.path;
+      row.runningTool = null;
+    }
+  }
+  renderSubagentRowPreview(row);
+  if (row.expanded) renderSubagentRowBody(row, card);
 }
 
 function applySubagentsEnd(m) {
@@ -335,7 +470,23 @@ function applySubagentsEnd(m) {
     const row = card.rows.get(r.id);
     if (!row) continue;
     row.dotEl.className = `dot ${r.isError ? "failed" : "done"}`;
-    row.detailEl.textContent = r.isError ? `Failed: ${(r.output || "").slice(0, 200)}` : (r.output || "").slice(0, 200);
+    // Close out any activity left dangling (e.g. the child threw mid-tool-
+    // call, so no `tool_end` ever arrived for the open entry).
+    if (row.runningTool) {
+      row.runningTool.status = r.isError ? "failed" : "done";
+      row.runningTool = null;
+    }
+    row.current = null;
+    if (r.isError) {
+      // The error text comes from the caught exception, not from any
+      // `onText` delta the child streamed — it wouldn't otherwise appear in
+      // the retained history, so it's recorded as its own entry here.
+      row.history.push({ kind: "text", text: r.output || "" });
+      row.detailEl.textContent = `Failed: ${(r.output || "").slice(0, 200)}`;
+    } else {
+      renderSubagentRowPreview(row);
+    }
+    if (row.expanded) renderSubagentRowBody(row, card);
     if (r.isError) failed++;
   }
   card.headLabelEl.textContent =
@@ -346,7 +497,8 @@ function applySubagentsEnd(m) {
   // vertical space in the transcript — same "collapse once done" shape the
   // composer-anchored checkpoint bar already uses (`cpbarExpanded`), just
   // applied per-card instead of to one persistent bar. Still togglable via
-  // the header click handler wired in `applySubagentsStart`.
+  // the header click handler wired in `applySubagentsStart`. Individual task
+  // rows keep whatever expand/collapse state the user left them in.
   card._setExpanded(false);
   scrollBottom();
 }

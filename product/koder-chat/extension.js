@@ -703,7 +703,15 @@ class AgentViewProvider {
   }
 
   onSubagentActivity(params) {
-    this.post({ type: "subagentActivity", batchId: params.batchId, taskId: params.taskId, kind: params.kind, detail: params.detail });
+    this.post({
+      type: "subagentActivity",
+      batchId: params.batchId,
+      taskId: params.taskId,
+      kind: params.kind,
+      detail: params.detail,
+      path: params.path,
+      isError: params.isError,
+    });
   }
 
   onSubagentsEnd(params) {

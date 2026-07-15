@@ -23711,18 +23711,23 @@ ${task.prompt}`;
 }
 async function runSubtask(childSession, task, cb, batchId, promptId, signal, depth) {
   const toolTitles = /* @__PURE__ */ new Map();
+  const toolPaths = /* @__PURE__ */ new Map();
   const childCb = {
     onText: (text) => cb.onSubagentActivity?.({ batchId, taskId: task.id, kind: "text", detail: summarizeText(text) }),
     onThinking: (text) => cb.onSubagentActivity?.({ batchId, taskId: task.id, kind: "thinking", detail: summarizeText(text) }),
     onToolStart: (c) => {
       toolTitles.set(c.id, c.title);
-      cb.onSubagentActivity?.({ batchId, taskId: task.id, kind: "tool_start", detail: c.title });
+      const path = c.name === "write_file" || c.name === "edit_file" ? c.input?.path : void 0;
+      if (path) toolPaths.set(c.id, path);
+      cb.onSubagentActivity?.({ batchId, taskId: task.id, kind: "tool_start", detail: c.title, path });
     },
     onToolEnd: (c) => cb.onSubagentActivity?.({
       batchId,
       taskId: task.id,
       kind: "tool_end",
-      detail: toolTitles.get(c.id) ?? (c.isError ? "failed" : "done")
+      detail: toolTitles.get(c.id) ?? (c.isError ? "failed" : "done"),
+      path: toolPaths.get(c.id),
+      isError: c.isError
     }),
     onPermission: (c) => cb.onPermission(c),
     onUsage: cb.onUsage,
