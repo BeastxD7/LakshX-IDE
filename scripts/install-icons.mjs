@@ -12,6 +12,14 @@ const installs = [
   ["koder.icns", "resources/darwin/code.icns"],
   ["koder.ico", "resources/win32/code.ico"],
   ["koder-512.png", "resources/linux/code.png"],
+  // Web/remote-access surface (the QR-code remote-access feature serves this
+  // over HTTP) — resources/server/favicon.ico, wired into <link rel="icon">
+  // by src/vs/code/browser/workbench/workbench{,-dev}.html and copied into
+  // the web/reh builds by build/gulpfile.vscode.web.ts +
+  // build/gulpfile.reh.ts. Reusing koder.ico is fine: it already carries a
+  // 16x16/24x24 (down to smaller) size set, a superset of what a favicon
+  // needs, and browsers pick the closest match from a multi-size .ico.
+  ["koder.ico", "resources/server/favicon.ico"],
 ];
 for (const [asset, dest] of installs) {
   const src = join(assets, asset);
@@ -19,6 +27,38 @@ for (const [asset, dest] of installs) {
   if (existsSync(src) && existsSync(dirname(dst))) {
     copyFileSync(src, dst);
     console.log(`icon: ${asset} → ${dest}`);
+  }
+}
+
+// The in-workbench app icon (SVG, not the native .icns/.ico/.png above) —
+// vs/workbench/browser/parts/titlebar/media/titlebarpart.css's
+// `.window-appicon` (the widget rendered top-left of the CUSTOM title bar on
+// Windows/Linux, i.e. window.titleBarStyle !== 'native') points at
+// vs/workbench/browser/media/code-icon.svg. Stock VS Code ships that file as
+// a plain blue "pages" glyph and relies on Microsoft's internal vscode-distro
+// pipeline to overlay it with the quality-branded icon at build time (see
+// vs/sessions/browser/media/openInVSCode.css's comments for confirmation of
+// that mechanism) — this fork doesn't run vscode-distro, so the file was
+// never overlaid and the stock blue icon leaked through. The same file is
+// also reused (without any distro step) by the update-available tooltip,
+// the onboarding page, the Getting Started walkthrough, the generic
+// walkthrough part, and the banner part, so this one swap fixes all of them
+// at once. Source is assets/icon.svg directly (same 1024x1024 viewBox as the
+// file it replaces, self-contained, no external refs) — no compositing
+// needed since it's a vector swap, unlike the Inno Setup bitmaps.
+const codeIconTargets = [
+  "src/vs/workbench/browser/media/code-icon.svg",
+  // Also refresh out/, if a previous compile already populated it, so a dev
+  // session doesn't need a full rebuild to see the fix (same reasoning as
+  // apply-ui.mjs's letterpress src+out dual write).
+  "out/vs/workbench/browser/media/code-icon.svg",
+];
+for (const dest of codeIconTargets) {
+  const src = join(assets, "icon.svg");
+  const dst = join(upstream, dest);
+  if (existsSync(src) && existsSync(dirname(dst))) {
+    copyFileSync(src, dst);
+    console.log(`icon: icon.svg → ${dest}`);
   }
 }
 
