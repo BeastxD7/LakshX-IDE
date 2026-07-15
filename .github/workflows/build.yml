@@ -157,11 +157,18 @@ jobs:
       # scripts/apply-ui.mjs (Koder doesn't build Microsoft's separate
       # Windows Store package, so that branch is opted out rather than
       # quality-gated — see that script's comment for why).
+      #
+      # vscode-win32-x64-inno-updater MUST run first: it copies
+      # inno_updater.exe/vcruntime140.dll into VSCode-win32-x64/tools/,
+      # which code.iss's [Files] section unconditionally globs
+      # ("tools/*") — running system-setup alone leaves that directory
+      # empty and Inno Setup aborts with "No files found matching
+      # ...\tools\*" (found the hard way on the first CI attempt at this).
       - name: Build Windows installer
         if: runner.os == 'Windows'
         shell: bash
         working-directory: upstream
-        run: npm run gulp vscode-win32-x64-system-setup
+        run: npm run gulp vscode-win32-x64-inno-updater vscode-win32-x64-system-setup
 
       - name: Archive (Windows)
         if: runner.os == 'Windows'
