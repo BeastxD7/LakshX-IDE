@@ -1351,12 +1351,12 @@ ${hasMd ? `<link rel="stylesheet" href="${mdcss}">` : ""}
     <div class="settings-body" id="whatsNewBody"></div>
   </div>
   <div id="topbar">
-    <div id="modes" role="tablist">
-      <button data-mode="review" class="mode active" title="Read-only: research and produce a plan">Review</button>
-      <button data-mode="approve" class="mode" title="Edits ask for approval">Approve</button>
-      <button data-mode="auto" class="mode" title="Agent acts without asking">Auto</button>
-      <button data-mode="royal" class="mode" title="Full autonomy, full machine access — no floor, no restrictions. Logged and checkpointed, not blocked.">Royal</button>
-    </div>
+    <select id="modeSelect" title="Agent mode">
+      <option value="review" selected title="Read-only: research and produce a plan">Review</option>
+      <option value="approve" title="Edits ask for approval">Approve</option>
+      <option value="auto" title="Agent acts without asking">Auto</option>
+      <option value="royal" title="Full autonomy, full machine access — no floor, no restrictions. Logged and checkpointed, not blocked.">Royal</option>
+    </select>
     <div class="spacer"></div>
     <button id="whatsNewBtn" class="ghost${whatsNewHasUnseen(this.context) ? " unseen" : ""}" title="What's new" aria-label="What's new">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.8L20 11l-6.1 2.2L12 19l-1.9-5.8L4 11l6.1-2.2L12 3z"/></svg>

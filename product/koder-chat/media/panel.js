@@ -7,7 +7,7 @@ const sendBtn = document.getElementById("send");
 const stopBtn = document.getElementById("stop");
 const modelEl = document.getElementById("model");
 const permissionBar = document.getElementById("permissionBar");
-const modesEl = document.getElementById("modes");
+const modeSelectEl = document.getElementById("modeSelect");
 const composerEl = document.getElementById("composer");
 const attachRow = document.getElementById("attachRow");
 const attachBtn = document.getElementById("attachBtn");
@@ -417,15 +417,10 @@ function setBusy(b) {
 
 // ---------- modes ----------
 function setModeUI(mode) {
-  for (const b of modesEl.querySelectorAll(".mode")) {
-    b.classList.toggle("active", b.dataset.mode === mode);
-  }
+  modeSelectEl.value = mode;
 }
-modesEl.addEventListener("click", (e) => {
-  const b = e.target.closest(".mode");
-  if (!b) return;
-  setModeUI(b.dataset.mode);
-  vscode.postMessage({ type: "setMode", mode: b.dataset.mode });
+modeSelectEl.addEventListener("change", () => {
+  vscode.postMessage({ type: "setMode", mode: modeSelectEl.value });
 });
 
 // ---------- attachments (chips): drag-drop, @-mention, attach-current-file ----------
