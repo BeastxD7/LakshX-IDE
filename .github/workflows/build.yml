@@ -38,9 +38,11 @@ jobs:
           - os: macos-14
             target: darwin-arm64
             artifact: Koder-macOS-arm64
-          - os: macos-13
-            target: darwin-x64
-            artifact: Koder-macOS-x64
+          # macos-13 (Intel, darwin-x64) dropped: Apple Silicon is the
+          # dominant current Mac hardware, and the macos-13 runner label has
+          # repeatedly sat "queued" for 30+ minutes without ever starting
+          # (a GitHub-side runner-capacity issue for that label, not a build
+          # failure) rather than actually building.
           - os: windows-2022
             target: win32-x64
             artifact: Koder-Windows-x64
