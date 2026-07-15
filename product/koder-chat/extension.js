@@ -605,7 +605,6 @@ class AgentViewProvider {
       },
       onNotification: (method, params) => {
         if (method === "session/update") this.onSessionUpdate(params.update);
-        if (method === "lakshx/plan_saved") this.onPlanSaved(params.path);
         if (method === "lakshx/plan_ready") this.onPlanReady(params.path);
         if (method === "lakshx/usage") this.post({ type: "usage", ...params });
         if (method === "lakshx/checkpoint") this.onCheckpoint(params);
@@ -824,14 +823,6 @@ class AgentViewProvider {
       await this.onWebviewMessage({ type: "send", text: "I am rejecting this plan. Ask me what direction you should take instead — do not start over on your own." });
     }
     // "enhance" is handled entirely in the webview (prefills the input)
-  }
-
-  async onPlanSaved(planPath) {
-    this.post({ type: "system", text: `Plan saved: ${path.relative(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "", planPath)}` });
-    try {
-      const doc = await vscode.workspace.openTextDocument(planPath);
-      await vscode.window.showTextDocument(doc, { preview: false, viewColumn: vscode.ViewColumn.One });
-    } catch {}
   }
 
   onPermissionRequest(params) {

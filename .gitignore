@@ -11,3 +11,10 @@ out/
 # packaged build output
 /VSCode-darwin-arm64/
 *.zip
+
+# LakshX agent runtime artifacts from dogfooding this repo as a workspace —
+# review-mode plan drafts (agent/src/server.ts's savePlan) are local scratch
+# saved on every "# Plan" reply, not a curated team history, so they don't
+# belong in git. .lakshx/rules.md is deliberately NOT ignored here — it's
+# committed project config, the same convention as AGENTS.md/CLAUDE.md.
+.lakshx/plans/
