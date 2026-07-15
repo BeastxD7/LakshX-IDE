@@ -1,15 +1,16 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Apple, Monitor, Terminal, Download } from "lucide-react";
+import { Monitor, Terminal, Download } from "lucide-react";
+import AppleLogo from "./AppleLogo";
 import CtaButton from "./CtaButton";
 import DownloadInstructionsModal from "./DownloadInstructionsModal";
 import { DOWNLOADS, isDownloadConfigured, type DownloadKey } from "@/lib/downloads";
 import { detectPlatform, type DetectedPlatform } from "@/lib/detect-platform";
 
-const PLATFORM_ICON: Record<DownloadKey, typeof Apple> = {
-  macArm: Apple,
-  macIntel: Apple,
+const PLATFORM_ICON: Record<DownloadKey, React.ComponentType<React.SVGProps<SVGSVGElement>>> = {
+  macArm: AppleLogo,
+  macIntel: AppleLogo,
   windows: Monitor,
   linux: Terminal,
 };
@@ -38,8 +39,6 @@ export default function DownloadCta() {
   const primaryConfigured = primaryTarget ? isDownloadConfigured(primaryTarget) : false;
   const PrimaryIcon = primaryKey ? PLATFORM_ICON[primaryKey] : Download;
 
-  const intelConfigured = isDownloadConfigured(DOWNLOADS.macIntel);
-
   return (
     <div className="flex flex-col items-center gap-3">
       {primaryTarget ? (
@@ -62,19 +61,6 @@ export default function DownloadCta() {
 
       {!primaryConfigured && primaryTarget && (
         <p className="text-xs text-white/70">Downloads aren&rsquo;t hosted yet — coming soon.</p>
-      )}
-
-      {platform === "mac" && (
-        <a
-          href={intelConfigured ? DOWNLOADS.macIntel.url : undefined}
-          aria-disabled={!intelConfigured}
-          onClick={() => intelConfigured && setActiveDownload("macIntel")}
-          className={`text-sm underline decoration-white/40 underline-offset-4 transition ${
-            intelConfigured ? "text-white/80 hover:text-white" : "pointer-events-none text-white/40"
-          }`}
-        >
-          Not on Apple Silicon? Download for Intel
-        </a>
       )}
 
       <DownloadInstructionsModal downloadKey={activeDownload} onClose={() => setActiveDownload(null)} />
