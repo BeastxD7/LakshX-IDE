@@ -26,7 +26,15 @@ console.log("product.json: applied " + Object.keys(overrides).length + " overrid
 shopt -s nullglob
 for p in patches/*.patch; do
   echo "applying $p"
-  git -C upstream apply --3way "../$p"
+  # --ignore-whitespace: Windows CI runners have core.autocrlf=true globally,
+  # so upstream/ is checked out with CRLF line endings there while every
+  # patch here is generated (and reviewed) on a LF-only machine — without
+  # this, git apply fails matching context on the very first hunk on Windows
+  # only (found the hard way: a patch that applied cleanly on macOS/Linux CI
+  # broke the Windows job outright). --ignore-whitespace tolerates the CRLF
+  # difference when matching context without needing to touch upstream/'s
+  # own autocrlf setting.
+  git -C upstream apply --3way --ignore-whitespace "../$p"
 done
 
 # LakshX UI layer: built-in theme extension + CSS injection
