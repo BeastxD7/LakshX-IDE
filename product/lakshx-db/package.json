@@ -16,8 +16,7 @@
     "mongodb": "^7.5.0"
   },
   "activationEvents": [
-    "onCommand:lakshx.db.showPanel",
-    "onCommand:lakshx.db.forgetCredentials"
+    "onStartupFinished"
   ],
   "contributes": {
     "commands": [

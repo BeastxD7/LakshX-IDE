@@ -10,7 +10,7 @@
   },
   "main": "./extension.js",
   "activationEvents": [
-    "onCommand:lakshx.showCallGraph"
+    "onStartupFinished"
   ],
   "contributes": {
     "commands": [
