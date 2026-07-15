@@ -69,6 +69,23 @@ export default function DownloadCta() {
           Not on Apple Silicon? Download for Intel
         </a>
       )}
+
+      {/*
+        LakshX isn't Apple-notarized yet (real fix: an Apple Developer ID +
+        `xcrun notarytool`, tracked separately) — macOS Gatekeeper flags any
+        downloaded-from-the-internet app that only has an ad-hoc signature as
+        "damaged" and refuses to open it, even though the file is fine. This
+        is a real, confirmed failure mode (not hypothetical), so surface the
+        fix inline rather than let every mac visitor hit a dead end.
+      */}
+      {platform === "mac" && (
+        <p className="max-w-sm text-center text-xs leading-relaxed text-white/50">
+          macOS may say the app &ldquo;is damaged&rdquo; on first open — this is a false alarm (LakshX isn&rsquo;t
+          Apple-notarized yet). Fix: right-click the app and choose <span className="text-white/70">Open</span>, or
+          run <code className="rounded bg-white/10 px-1 py-0.5 text-white/70">xattr -cr /Applications/LakshX.app</code>{" "}
+          in Terminal.
+        </p>
+      )}
     </div>
   );
 }
