@@ -75,7 +75,7 @@ all. It's `agent/src/server.ts`, compiled/bundled by esbuild into a single Commo
 
 ```
 esbuild src/server.ts --bundle --platform=node --target=node20 --format=cjs \
-  --outfile=../product/koder-chat/agent/server.cjs
+  --outfile=../product/koder-chat/agent/server.cjs --external:playwright-core
 ```
 
 `extension.js` spawns that bundle as a **child process** and talks to it over
@@ -87,12 +87,31 @@ short and telling:
 ```json
 "dependencies": {
   "@agentclientprotocol/sdk": "^1.2.1",
-  "@zed-industries/claude-code-acp": "^0.16.2"
+  "@zed-industries/claude-code-acp": "^0.16.2",
+  "playwright-core": "^1.61.1"
 }
 ```
 
 No agent framework. The entire "intelligence" is: a system prompt, a conversation history
-array, six tool definitions, and a loop.
+array, a handful of tool definitions, and a loop.
+
+**`--external:playwright-core` is load-bearing, not a style choice.** `playwright-core` (used
+by the `browser_preview` tool, `agent/src/browser.ts`) ships its own internal pre-bundle
+(`lib/coreBundle.js`) that does `__dirname`-relative lookups for its own `package.json` and,
+more importantly, `browsers.json` (the manifest it reads at runtime to resolve
+`{channel: "chrome"}`/`{channel: "msedge"}` to an actual installed browser). Those lookups
+assume playwright-core sits at its normal `node_modules/playwright-core/` location; esbuild
+flattening it into `server.cjs` moves `__dirname` and breaks both lookups outright (confirmed
+by bundling it in — `require('server.cjs')` throws `MODULE_NOT_FOUND` for `browsers.json` at
+load time, before any tool even runs). So `playwright-core` is NOT bundled into `server.cjs` —
+it stays a real dependency of **`product/koder-chat/package.json`** (not `agent/package.json`
+alone), same pattern `product/koder-db/package.json` already uses for `mongodb`: Node's normal
+`require()` resolution walks up from `product/koder-chat/agent/server.cjs`'s directory and
+finds it in `product/koder-chat/node_modules/`. `scripts/apply-ui.mjs`'s `dirs.ts` patch (which
+already lists `extensions/koder-db` so upstream's own `npm ci` installs its real dependency —
+see that script's comment) lists `extensions/koder-chat` for the identical reason: without it,
+a packaged/CI build never runs `npm install` inside `extensions/koder-chat` and
+`require("playwright-core")` fails at runtime exactly like `require("mongodb")` would have.
 
 ### Why a separate process matters
 

@@ -12,6 +12,9 @@
   "scripts": {
     "test:unit": "node --test test/*.test.js"
   },
+  "dependencies": {
+    "playwright-core": "^1.61.1"
+  },
   "activationEvents": [
     "onStartupFinished"
   ],

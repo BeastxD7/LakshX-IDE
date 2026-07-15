@@ -19,7 +19,7 @@ if (!existsSync(join(upstream, "package.json"))) {
 }
 
 // 1. built-in extensions
-for (const ext of ["koder-ui", "koder-chat", "koder-graph", "theme-koder-carbon", "theme-koder-symbols"]) {
+for (const ext of ["koder-ui", "koder-chat", "koder-graph", "koder-db", "theme-koder-carbon", "theme-koder-symbols"]) {
   cpSync(join(root, "product", ext), join(upstream, "extensions", ext), { recursive: true });
   console.log(`${ext} extension → extensions/${ext}`);
 }
@@ -47,15 +47,53 @@ console.log("removed extensions/copilot");
   // is safe — this is a disposable, gitignored build tree, and TypeScript
   // doesn't care about line-ending style.
   const dirsSrc = readFileSync(dirsFile, "utf8").replace(/\r\n/g, "\n");
-  const patched = dirsSrc.replace(/^\t'extensions\/copilot',\n/m, "");
+  let patched = dirsSrc.replace(/^\t'extensions\/copilot',\n/m, "");
   if (patched === dirsSrc) {
     console.error(
       "upstream/build/npm/dirs.ts: expected to find and remove the 'extensions/copilot' entry, but it wasn't there — upstream's dirs.ts format may have changed. Fix scripts/apply-ui.mjs's regex."
     );
     process.exit(1);
   }
+
+  // 1d. the opposite problem: koder-db is the first LakshX built-in
+  // extension with a REAL npm dependency (the `mongodb` driver — see
+  // product/koder-db/package.json). Unlike koder-ui/koder-chat/koder-graph
+  // (zero deps, so their absence from dirs.ts was harmless), upstream's own
+  // `npm ci`/postinstall in extensions/ only installs into directories
+  // listed here — without this entry, extensions/koder-db/node_modules
+  // never gets populated by CI and `require("mongodb")` fails at runtime in
+  // a packaged build (works locally only because this repo's own
+  // `npm install` was already run inside product/koder-db by hand).
+  const beforeDb = patched;
+  patched = patched.replace(/^\t'extensions',\n/m, "\t'extensions',\n\t'extensions/koder-db',\n");
+  if (patched === beforeDb) {
+    console.error(
+      "upstream/build/npm/dirs.ts: expected to find the 'extensions' entry to insert 'extensions/koder-db' after it, but it wasn't there — upstream's dirs.ts format may have changed. Fix scripts/apply-ui.mjs's regex."
+    );
+    process.exit(1);
+  }
+
+  // 1e. koder-chat now has the same real-dependency problem as koder-db
+  // above, for the same reason: `agent/src/browser.ts`'s `browser_preview`
+  // tool uses `playwright-core`, and `agent/package.json`'s esbuild bundle
+  // deliberately marks it `--external` rather than inlining it into
+  // `server.cjs` (see docs/architecture.md §3 — playwright-core's own
+  // internal `__dirname`-relative lookups, e.g. `browsers.json`, break once
+  // flattened into a different file by esbuild). That means
+  // `product/koder-chat/package.json`'s `playwright-core` dependency needs
+  // real `npm install`, same as koder-db's `mongodb` — without this entry,
+  // `require("playwright-core")` fails at runtime in a packaged build.
+  const beforeChat = patched;
+  patched = patched.replace(/^\t'extensions\/koder-db',\n/m, "\t'extensions/koder-db',\n\t'extensions/koder-chat',\n");
+  if (patched === beforeChat) {
+    console.error(
+      "upstream/build/npm/dirs.ts: expected to find the just-inserted 'extensions/koder-db' entry to insert 'extensions/koder-chat' after it. Fix scripts/apply-ui.mjs's regex."
+    );
+    process.exit(1);
+  }
+
   writeFileSync(dirsFile, patched);
-  console.log("patched build/npm/dirs.ts (dropped extensions/copilot install target)");
+  console.log("patched build/npm/dirs.ts (dropped extensions/copilot install target, added extensions/koder-db and extensions/koder-chat)");
 }
 
 // 2. CSS injection
