@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Apple, Monitor, Terminal, Download } from "lucide-react";
 import CtaButton from "./CtaButton";
+import DownloadInstructionsModal from "./DownloadInstructionsModal";
 import { DOWNLOADS, isDownloadConfigured, type DownloadKey } from "@/lib/downloads";
 import { detectPlatform, type DetectedPlatform } from "@/lib/detect-platform";
 
@@ -21,6 +22,10 @@ const PLATFORM_ICON: Record<DownloadKey, typeof Apple> = {
  */
 export default function DownloadCta() {
   const [platform, setPlatform] = useState<DetectedPlatform>("unknown");
+  // Which download was just clicked, so the post-download modal shows the
+  // right platform's instructions — set on click, not on a timer/poll, so
+  // it appears the instant the download actually starts.
+  const [activeDownload, setActiveDownload] = useState<DownloadKey | null>(null);
 
   useEffect(() => {
     setPlatform(detectPlatform());
@@ -44,6 +49,7 @@ export default function DownloadCta() {
           href={primaryTarget.url}
           disabled={!primaryConfigured}
           className="min-w-[15rem]"
+          onClick={() => primaryConfigured && primaryKey && setActiveDownload(primaryKey)}
         >
           <PrimaryIcon className="h-5 w-5" aria-hidden="true" />
           Download for {platform === "mac" ? "macOS" : platform === "windows" ? "Windows" : "Linux"}
@@ -62,6 +68,7 @@ export default function DownloadCta() {
         <a
           href={intelConfigured ? DOWNLOADS.macIntel.url : undefined}
           aria-disabled={!intelConfigured}
+          onClick={() => intelConfigured && setActiveDownload("macIntel")}
           className={`text-sm underline decoration-white/40 underline-offset-4 transition ${
             intelConfigured ? "text-white/80 hover:text-white" : "pointer-events-none text-white/40"
           }`}
@@ -70,22 +77,7 @@ export default function DownloadCta() {
         </a>
       )}
 
-      {/*
-        LakshX isn't Apple-notarized yet (real fix: an Apple Developer ID +
-        `xcrun notarytool`, tracked separately) — macOS Gatekeeper flags any
-        downloaded-from-the-internet app that only has an ad-hoc signature as
-        "damaged" and refuses to open it, even though the file is fine. This
-        is a real, confirmed failure mode (not hypothetical), so surface the
-        fix inline rather than let every mac visitor hit a dead end.
-      */}
-      {platform === "mac" && (
-        <p className="max-w-sm text-center text-xs leading-relaxed text-white/50">
-          macOS may say the app &ldquo;is damaged&rdquo; on first open — this is a false alarm (LakshX isn&rsquo;t
-          Apple-notarized yet). Fix: right-click the app and choose <span className="text-white/70">Open</span>, or
-          run <code className="rounded bg-white/10 px-1 py-0.5 text-white/70">xattr -cr /Applications/LakshX.app</code>{" "}
-          in Terminal.
-        </p>
-      )}
+      <DownloadInstructionsModal downloadKey={activeDownload} onClose={() => setActiveDownload(null)} />
     </div>
   );
 }
