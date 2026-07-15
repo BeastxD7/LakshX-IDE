@@ -220,7 +220,7 @@ var SCRIPT = [
   "        // even though a single desktop click switches modes with none.",
   "        var confirmed = window.confirm(",
   "          'Switch to Royal mode? Full autonomy: no safety floor, no permission prompts. ' +",
-  "          'Every action still runs (logged and checkpointed) but nothing stops it in the moment.'",
+  "          'Every action still runs and is logged, but only in-workspace changes are checkpointed/undoable — nothing stops it in the moment.'",
   "        );",
   "        if (!confirmed) return;",
   "      }",

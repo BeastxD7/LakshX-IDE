@@ -1033,7 +1033,7 @@ class AgentViewProvider {
           if (!hasRoyalConsent(cwd)) {
             const confirmLabel = "I understand — enable Royal mode";
             const choice = await vscode.window.showWarningMessage(
-              "Royal mode gives the agent full, unrestricted access to this machine: no safety floor, no permission prompts — force-push, deleting files anywhere, running any command all run exactly as issued. Every action is still logged and checkpointed in the background (never blocked) so you have a record and an undo path if something goes wrong, but nothing stops it in the moment.",
+              "Royal mode gives the agent full, unrestricted access to this machine: no safety floor, no permission prompts — force-push, deleting files anywhere, running any command all run exactly as issued. Every action is still logged in the background (never blocked), but the undo/checkpoint safety net only covers this workspace — a change to a file outside it is logged but NOT checkpointed, so there's no undo button for that specific change. Nothing stops any of this in the moment.",
               { modal: true },
               confirmLabel,
             );
