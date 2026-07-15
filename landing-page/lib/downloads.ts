@@ -48,7 +48,9 @@ export const DOWNLOADS: Record<DownloadKey, DownloadTarget> = {
   windows: {
     label: "Windows",
     shortLabel: "Windows",
-    url: "https://qflnh9roir6uolgc.public.blob.vercel-storage.com/koder/Koder-Windows-x64.zip",
+    // A real installer .exe now (CI build 29410662610), not the old zip of
+    // loose files — see .github/workflows/build.yml's Windows installer fix.
+    url: "https://qflnh9roir6uolgc.public.blob.vercel-storage.com/koder/Koder-Windows-x64-Setup.exe",
   },
   linux: {
     label: "Linux",
