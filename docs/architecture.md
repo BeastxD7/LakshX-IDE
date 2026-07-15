@@ -339,7 +339,53 @@ a Keychain re-prompt on next launch if you skip the re-sign step.
 
 ---
 
-## 10. What to read next
+## 10. Reliability roadmap: closing the gap to industry-grade
+
+Section 1 is honest that Koder's agent is a lean, hand-rolled "system prompt + tool-calling
+loop," not a framework like LangChain or a vendor Agent SDK. That's a deliberate choice, not
+an oversight — the Claude Agent SDK and OpenAI Agents SDK both automate the same loop
+(`runPrompt` in `loop.ts` is functionally what their `query()`/`Runner` do), but adopting
+either one would mean giving up the provider-agnostic `ChatAdapter` (`providers/anthropic.ts`
+/ `providers/openai-compat.ts`) for a single-vendor runtime. Research into how comparable
+tools (Claude Code, Cursor, Devin, Anthropic's own production Research feature) actually
+achieve reliability turned up three concrete, evidence-backed gaps worth closing —
+**without** a framework migration:
+
+1. **Tracing/observability.** `loop.ts` currently has no record of what prompt actually went
+   to the provider, what came back, token cost, or where in a run something degraded — the
+   only introspection is `audit.ts`'s Royal-mode audit log (which exists for safety review,
+   not debugging). A dedicated tracing layer (Langfuse — open source, self-hostable, wraps
+   around an existing loop instead of requiring a rewrite — or MLflow's OpenTelemetry-compatible
+   tracing) is the highest-leverage, lowest-risk addition: instrument the `adapter.runTurn()`
+   call and each tool execution in `runPrompt`, ship spans out, gain visibility for free.
+2. **Context compaction as a first-class concern.** `session.history` (`loop.ts`) grows
+   unbounded across a conversation — `context.ts` only truncates individual oversized tool
+   outputs (`cap` in `envBlock`), there is no summarization/compaction of the running history
+   itself. A recent (2026, not yet peer-reviewed) benchmark found that summarizer-model choice
+   alone swung SWE-bench Verified accuracy by 6.5 points, holding the execution agent fixed —
+   i.e. compaction quality measurably affects task success, not just token cost. Worth
+   benchmarking before treating it as an afterthought.
+3. **Scoped subagent delegation.** Anthropic's own production Research feature ships an
+   orchestrator-worker pattern: a lead agent decomposes and delegates to subagents with
+   isolated context. Koder's `AgentSession.history` already provides the isolation primitive
+   a child session would need — a `delegate_subtask` tool that spawns a nested `runPrompt`
+   with its own fresh history, inherits the parent's mode (so `floorCheck`/`onPermission`
+   apply for free), and returns only its final text (not its full tool trace) to the parent
+   would be additive, not a rewrite. True *parallel* subagents are a bigger lift: the shadow-git
+   checkpoint system (`checkpoint.ts`) commits per-tool-call against one shared working tree,
+   so concurrent workers would race on it — sequential delegation first, worktree-isolated
+   parallelism (mirroring how Cursor's background agents each get their own git worktree)
+   only once that proves out.
+
+What this roadmap deliberately does **not** claim: specific reliability numbers for how
+Cursor or Devin handle retries, rate-limit backoff, or tool-execution sandboxing internally —
+those claims didn't survive scrutiny and remain a real gap in public information, not a
+pattern to copy. Treat any blog post asserting precise internals for those products with the
+same skepticism.
+
+---
+
+## 11. What to read next
 
 - `docs/research/09-royal-mode-autonomous.md` — Royal mode's full design rationale.
 - `docs/research/10-remote-control.md` — remote control's phased design (view-only → full control).
