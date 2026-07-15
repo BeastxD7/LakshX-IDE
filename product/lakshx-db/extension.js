@@ -284,9 +284,22 @@ async function forgetCredentials(context, { silent = false } = {}) {
 }
 
 function activate(context) {
+  // Status bar entry point — this extension had NO visible UI entry point
+  // before (command palette only), which is exactly the discoverability gap
+  // a real user hit. Priority 998, right after koder-chat's "✦ LakshX"
+  // (1000) and "$(radio-tower) Remote: ..." (999) items, so it lands
+  // immediately beside them in the same right-aligned group rather than
+  // floating off on its own.
+  const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 998);
+  statusItem.text = "$(database) DB";
+  statusItem.tooltip = "Open LakshX Database Panel (MongoDB)";
+  statusItem.command = "lakshx.db.showPanel";
+  statusItem.show();
+
   context.subscriptions.push(
     vscode.commands.registerCommand("lakshx.db.showPanel", () => showPanel(context)),
     vscode.commands.registerCommand("lakshx.db.forgetCredentials", () => forgetCredentials(context)),
+    statusItem,
     log,
   );
 }
