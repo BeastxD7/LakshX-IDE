@@ -37,6 +37,11 @@ let currentPermissionId = null;
 // response to react to (never for pure tool-only turns).
 let lastAgentEl = null;
 let turnHasText = false;
+// The promptId of the turn currently streaming in, so attachFeedback() can
+// wire up a per-turn undo icon alongside thumbs-up/down/retry. Set from both
+// "user" event sites (replay and live) since a user message always opens the
+// turn whose promptId every subsequent checkpoint/assistant event shares.
+let currentPromptId = null;
 
 // ---------- rendering ----------
 function renderRich(raw) {
@@ -197,6 +202,11 @@ function applyRevert(paths) {
     if (card.files.size === 0) {
       card.el.remove();
       checkpointCards.delete(promptId);
+      // This turn's files are all reverted — the feedback-row undo icon (if
+      // one was rendered for this promptId) no longer has anything to do;
+      // disable it rather than leaving a dead action live in the transcript.
+      const undoBtn = document.querySelector(`.fb-btn[data-act="undo"][data-prompt-id="${promptId}"]`);
+      if (undoBtn) undoBtn.disabled = true;
     } else {
       renderCheckpointCard(promptId, card);
     }
@@ -822,9 +832,16 @@ function showPlanBar(relPath) {
 // full-screen overlay like settings/history. Everything here posts to the
 // extension, which does the actual local, offline JSONL logging; this file
 // only builds the UI and the message payloads.
-function attachFeedback(msgEl) {
+function attachFeedback(msgEl, promptId) {
   const wrap = document.createElement("div");
   wrap.className = "feedback";
+  // The undo icon only renders when this turn actually has a checkpoint card
+  // (mirrors the "never show a zero-file affordance" rule the card/session
+  // bar already follow) — a turn with no mutating tool calls has nothing to
+  // undo. Chats from before this feature, or replayed from a non-LakshX ACP
+  // client that never sent promptId, simply never match here — no crash,
+  // the icon just doesn't render.
+  const canUndo = promptId != null && checkpointCards.has(promptId);
   wrap.innerHTML = `<div class="feedback-actions">
     <button class="ghost fb-btn" data-act="up" title="Good response" aria-label="Good response">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 22V11M2 13v7a2 2 0 0 0 2 2h14.3a2 2 0 0 0 2-1.7l1.4-9A2 2 0 0 0 19.7 9H14l1-5.5a2 2 0 0 0-3.7-1.3L7 9"/></svg>
@@ -834,7 +851,10 @@ function attachFeedback(msgEl) {
     </button>
     <button class="ghost fb-btn" data-act="retry" title="Retry with the same prompt" aria-label="Retry">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.3M21 3v6h-6"/></svg>
-    </button>
+    </button>${canUndo ? `
+    <button class="ghost fb-btn" data-act="undo" data-prompt-id="${promptId}" title="Undo this turn's file changes" aria-label="Undo this turn's file changes">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10h10a5 5 0 0 1 5 5v6M3 10l6-6M3 10l6 6"/></svg>
+    </button>` : ""}
   </div>`;
   msgEl.insertAdjacentElement("afterend", wrap);
   wrap.addEventListener("click", (e) => {
@@ -848,6 +868,14 @@ function attachFeedback(msgEl) {
       note.textContent = "Retrying…";
       btn.insertAdjacentElement("afterend", note);
       setTimeout(() => note.remove(), 2500);
+      return;
+    }
+    if (btn.dataset.act === "undo") {
+      // Same message + same extension.js handler ("undoPrompt") the
+      // checkpoint card's own "Undo all" button already sends — conflict/
+      // overlap handling (showUndoConfirm) is unchanged and still routes
+      // through the matching checkpoint card, not this button.
+      requestUndoPrompt(btn.dataset.promptId);
       return;
     }
     for (const b of wrap.querySelectorAll('.fb-btn[data-act="up"], .fb-btn[data-act="down"]')) {
@@ -914,7 +942,7 @@ function openFeedbackForm(wrap, kind) {
 
 /** Called at every turn boundary (live or replay); no-op if the turn had no text. */
 function maybeAttachFeedback() {
-  if (turnHasText && lastAgentEl) attachFeedback(lastAgentEl);
+  if (turnHasText && lastAgentEl) attachFeedback(lastAgentEl, currentPromptId);
   turnHasText = false;
   lastAgentEl = null;
 }
@@ -984,7 +1012,7 @@ function showWhatsNew(entries) {
 // ---------- replay (webview rebuilds when hidden) ----------
 function applyEvent(m, replaying) {
   switch (m.type) {
-    case "user": addMsg("user", m.text); break;
+    case "user": currentPromptId = m.promptId ?? currentPromptId; addMsg("user", m.text); break;
     case "chunk": replaying ? bulkChunk(m.text) : streamText(m.text); break;
     case "thought": if (!replaying) streamThought(m.text); break;
     case "tool": addTool(m); break;
@@ -1159,7 +1187,7 @@ window.addEventListener("message", (e) => {
       document.getElementById("thinking")?.remove();
       streamThought(m.text);
       break;
-    case "user": addMsg("user", m.text); break;
+    case "user": currentPromptId = m.promptId ?? currentPromptId; addMsg("user", m.text); break;
     case "tool":
       document.getElementById("thinking")?.remove();
       addTool(m);
