@@ -1,0 +1,126 @@
+{
+  "name": "lakshx-terminal",
+  "displayName": "LakshX Terminal Blocks",
+  "description": "LakshX's terminal command blocks — a side-panel view that mirrors your integrated terminal's command history as discrete, collapsible entries (command, exit code, duration, rerun/copy), built on VS Code's native shell-integration API. Does not restyle the terminal buffer itself.",
+  "version": "0.0.1",
+  "publisher": "lakshx",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.128.0"
+  },
+  "main": "./extension.js",
+  "scripts": {
+    "test:unit": "node --test test/*.test.js"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "panel": [
+        {
+          "id": "lakshxTerminalPanel",
+          "title": "Command Blocks",
+          "icon": "media/terminal.svg"
+        }
+      ]
+    },
+    "views": {
+      "lakshxTerminalPanel": [
+        {
+          "id": "lakshx.terminalHistoryView",
+          "name": "Command Blocks",
+          "icon": "media/terminal.svg",
+          "contextualTitle": "LakshX Terminal Blocks"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "lakshx.terminalHistoryView",
+        "contents": "No commands recorded yet.\nRun something in the integrated terminal — each command becomes a collapsible block here with its exit code, duration, and rerun/copy actions.\n[Learn about shell integration](https://code.visualstudio.com/docs/terminal/shell-integration)"
+      }
+    ],
+    "commands": [
+      {
+        "command": "lakshx.terminal.showHistory",
+        "title": "LakshX: Show Terminal Command Blocks",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "lakshx.terminal.rerunLast",
+        "title": "LakshX: Rerun Last Terminal Command",
+        "icon": "$(debug-rerun)"
+      },
+      {
+        "command": "lakshx.terminal.clearHistory",
+        "title": "LakshX: Clear Terminal Command History",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "lakshx.terminal.rerunEntry",
+        "title": "LakshX: Rerun Command",
+        "icon": "$(debug-rerun)"
+      },
+      {
+        "command": "lakshx.terminal.copyCommand",
+        "title": "LakshX: Copy Command",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "lakshx.terminal.copyOutput",
+        "title": "LakshX: Copy Captured Output",
+        "icon": "$(clippy)"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "lakshx.terminal.showHistory"
+        },
+        {
+          "command": "lakshx.terminal.rerunLast"
+        },
+        {
+          "command": "lakshx.terminal.clearHistory"
+        },
+        {
+          "command": "lakshx.terminal.rerunEntry",
+          "when": "false"
+        },
+        {
+          "command": "lakshx.terminal.copyCommand",
+          "when": "false"
+        },
+        {
+          "command": "lakshx.terminal.copyOutput",
+          "when": "false"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "lakshx.terminal.clearHistory",
+          "when": "view == lakshx.terminalHistoryView",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "lakshx.terminal.rerunEntry",
+          "when": "view == lakshx.terminalHistoryView && viewItem =~ /^lakshx\\.commandEntry/",
+          "group": "inline@1"
+        },
+        {
+          "command": "lakshx.terminal.copyCommand",
+          "when": "view == lakshx.terminalHistoryView && viewItem =~ /^lakshx\\.commandEntry/",
+          "group": "inline@2"
+        },
+        {
+          "command": "lakshx.terminal.copyOutput",
+          "when": "view == lakshx.terminalHistoryView && viewItem == lakshx.commandEntryWithOutput",
+          "group": "inline@3"
+        }
+      ]
+    }
+  }
+}
