@@ -1,0 +1,34 @@
+{
+  "name": "lakshx-structural-search",
+  "displayName": "LakshX Structural Search",
+  "description": "Find & replace by code SHAPE, not literal text — JetBrains-SSR-style structural search for JS/TS using placeholders ($FN, $$ARGS), with a mandatory preview-before-apply diff. Token-level structural match, not full AST — see README for scope.",
+  "version": "0.0.1",
+  "publisher": "lakshx",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.128.0"
+  },
+  "main": "./extension.js",
+  "scripts": {
+    "test:unit": "node --test test/*.test.js"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "lakshx.structuralSearch.show",
+        "title": "LakshX: Structural Search & Replace",
+        "icon": "$(regex)"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "lakshx.structuralSearch.show"
+        }
+      ]
+    }
+  }
+}

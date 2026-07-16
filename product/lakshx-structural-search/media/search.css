@@ -1,0 +1,195 @@
+:root {
+  /* Same rationale as lakshx-graph/media/graph.css: this panel is always
+     dark, independent of OS theme, so native form controls don't fall back
+     to a light Chromium default that ignores our page CSS. */
+  color-scheme: dark;
+  --bg: var(--vscode-sideBar-background, #0e1116);
+  --fg: #c8cede;
+  --muted: #8a93a8;
+  --faint: #5c6577;
+  --accent: #7c5cff;
+  --accent-soft: rgba(124, 92, 255, 0.14);
+  --card: rgba(255, 255, 255, 0.035);
+  --hairline: rgba(255, 255, 255, 0.08);
+  --radius: 10px;
+  --mono: "JetBrains Mono", "SF Mono", Menlo, monospace;
+  --add: #5cd6a8; /* added/after text */
+  --del: #ff5c7c; /* removed/before text */
+  --warn: #ffb84d;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+#toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--hairline);
+  flex-shrink: 0;
+}
+#fields {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+#fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1 1 320px;
+  font-size: 11px;
+  color: var(--muted);
+}
+#fields input {
+  font-family: var(--mono);
+  font-size: 13px;
+  background: var(--card);
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  color: var(--fg);
+  padding: 6px 8px;
+}
+#fields input:focus {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+#actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+button {
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+button.ghost {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--hairline);
+}
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+button:hover:not(:disabled) { filter: brightness(1.08); }
+
+#hint {
+  padding: 8px 12px;
+  font-size: 11px;
+  color: var(--faint);
+  border-bottom: 1px solid var(--hairline);
+  flex-shrink: 0;
+}
+#hint code {
+  font-family: var(--mono);
+  background: var(--card);
+  border-radius: 3px;
+  padding: 0 3px;
+  color: var(--fg);
+}
+
+#status {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+#status.error { color: var(--del); }
+#status.warn { color: var(--warn); }
+
+#results {
+  flex: 1;
+  overflow: auto;
+  padding: 4px 0 40px;
+}
+
+.fileGroup {
+  border-bottom: 1px solid var(--hairline);
+}
+.fileHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.02);
+  position: sticky;
+  top: 0;
+}
+.fileHeader .count {
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.matchRow {
+  display: flex;
+  gap: 10px;
+  padding: 6px 12px 8px 28px;
+  border-top: 1px solid transparent;
+}
+.matchRow:hover { background: var(--card); }
+.matchRow input[type="checkbox"] {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+.matchBody {
+  flex: 1;
+  min-width: 0;
+}
+.matchLoc {
+  font-size: 11px;
+  color: var(--faint);
+  cursor: pointer;
+}
+.matchLoc:hover { color: var(--accent); text-decoration: underline; }
+.diffLine {
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 2px 6px;
+  border-radius: 4px;
+  margin-top: 2px;
+}
+.diffLine.before {
+  color: var(--del);
+  background: rgba(255, 92, 124, 0.08);
+}
+.diffLine.before::before { content: "− "; opacity: 0.7; }
+.diffLine.after {
+  color: var(--add);
+  background: rgba(92, 214, 168, 0.08);
+}
+.diffLine.after::before { content: "+ "; opacity: 0.7; }
+
+#empty {
+  padding: 24px 12px;
+  color: var(--faint);
+  font-size: 12px;
+  text-align: center;
+}
