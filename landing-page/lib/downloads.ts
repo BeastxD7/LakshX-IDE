@@ -19,6 +19,19 @@
  * NOT_CONFIGURED_URL as "not wired up yet" and render a visibly disabled
  * "Coming soon" state instead of a live link, so a placeholder can never
  * look like a working download to a real visitor.
+ *
+ * Cache-busting: these blob paths are STABLE (same filename re-uploaded in
+ * place every time we ship a new build), but the blob is served with
+ * `Cache-Control: public, max-age=2592000` (30 days, no revalidation). A
+ * visitor whose browser cached an older upload at that exact path keeps
+ * getting served that stale — possibly since-fixed-and-replaced — file
+ * from local disk cache for up to 30 days, with no way to notice. This
+ * bit a real user as a spurious "downloaded file is corrupted" report
+ * traced back to the *previous* upload's cached bytes, not the current
+ * (verified-good) one. Every `url` therefore carries a `?v=` query param;
+ * bump it (any distinct string works, e.g. today's date) whenever a new
+ * file is uploaded to the same path, so returning visitors are forced to
+ * fetch fresh bytes instead of serving a stale disk-cached copy.
  */
 
 export const NOT_CONFIGURED_URL = "#download-not-configured";
@@ -34,6 +47,16 @@ export interface DownloadTarget {
   url: string;
 }
 
+/** Bump the value for a platform every time a new file is uploaded to its
+ * (stable) blob path — see the cache-busting note above. */
+const BLOB_VERSION: Record<Exclude<DownloadKey, "macIntel">, string> = {
+  macArm: "2026-07-15",
+  windows: "2026-07-15",
+  linux: "2026-07-16",
+};
+
+const withVersion = (url: string, version: string) => `${url}?v=${version}`;
+
 export const DOWNLOADS: Record<DownloadKey, DownloadTarget> = {
   macArm: {
     label: "macOS (Apple Silicon)",
@@ -44,7 +67,7 @@ export const DOWNLOADS: Record<DownloadKey, DownloadTarget> = {
     // currently blocked. See patches/darwin-dmg-title-use-product-name.patch
     // for a real branding bug found while building this (volume title said
     // "VS Code" despite the app inside correctly being LakshX.app).
-    url: "https://qflnh9roir6uolgc.public.blob.vercel-storage.com/koder/LakshX-macOS-arm64.dmg",
+    url: withVersion("https://qflnh9roir6uolgc.public.blob.vercel-storage.com/koder/LakshX-macOS-arm64.dmg", BLOB_VERSION.macArm),
   },
   macIntel: {
     label: "macOS (Intel)",
@@ -56,12 +79,12 @@ export const DOWNLOADS: Record<DownloadKey, DownloadTarget> = {
     shortLabel: "Windows",
     // A real installer .exe now (CI build 29410662610), not the old zip of
     // loose files — see .github/workflows/build.yml's Windows installer fix.
-    url: "https://qflnh9roir6uolgc.public.blob.vercel-storage.com/koder/Koder-Windows-x64-Setup.exe",
+    url: withVersion("https://qflnh9roir6uolgc.public.blob.vercel-storage.com/koder/Koder-Windows-x64-Setup.exe", BLOB_VERSION.windows),
   },
   linux: {
     label: "Linux",
     shortLabel: "Linux",
-    url: "https://qflnh9roir6uolgc.public.blob.vercel-storage.com/koder/Koder-Linux-x64.tar.gz",
+    url: withVersion("https://qflnh9roir6uolgc.public.blob.vercel-storage.com/koder/Koder-Linux-x64.tar.gz", BLOB_VERSION.linux),
   },
 };
 
