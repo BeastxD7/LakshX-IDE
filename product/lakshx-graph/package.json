@@ -26,6 +26,11 @@
         "command": "lakshx.showDependencyGraph",
         "title": "LakshX: Show Dependency Graph",
         "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "lakshx.graph.scanVulnerabilities",
+        "title": "LakshX: Scan Dependencies for Vulnerabilities",
+        "icon": "$(shield)"
       }
     ],
     "menus": {
@@ -50,6 +55,9 @@
         },
         {
           "command": "lakshx.showDependencyGraph"
+        },
+        {
+          "command": "lakshx.graph.scanVulnerabilities"
         }
       ]
     }

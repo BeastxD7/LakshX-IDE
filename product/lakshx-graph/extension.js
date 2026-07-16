@@ -16,6 +16,7 @@ const vscode = require("vscode");
 const fs = require("fs");
 const path = require("path");
 const depgraph = require("./lib/depgraph.js");
+const vuln = require("./lib/vuln-check.js");
 
 // ---- dependency-scan bounds (a bounded STATIC scan; no code is executed) ----
 const SCAN_MAX_FILES = 2000; // hard cap on files opened
@@ -170,12 +171,14 @@ function relPathOf(uri) {
 }
 
 /**
- * Scan the workspace and build a dependency graph. This is the ONE place that
- * touches the filesystem; all parsing/model logic lives in lib/depgraph.js.
- * Returns the webview payload ({nodes, edges, cycles, stats}) already capped to
- * RENDER_NODE_CAP. Best-effort: unreadable files are skipped, not fatal.
+ * Gather workspace source files (bounded scan: SCAN_MAX_FILES / SCAN_MAX_BYTES,
+ * same include/exclude globs as the dependency graph). This is the ONE place
+ * that touches the filesystem for a workspace-wide scan; shared by the
+ * dependency graph (below) and the vulnerability full-workspace scan so the
+ * bounds and file-reading logic aren't duplicated. Best-effort: unreadable
+ * files are skipped, not fatal.
  */
-async function scanDependencyGraph(progress) {
+async function gatherWorkspaceFiles(progress) {
   const uris = await vscode.workspace.findFiles(SCAN_INCLUDE, SCAN_EXCLUDE, SCAN_MAX_FILES);
   const files = [];
   depPathToUri = new Map();
@@ -193,7 +196,16 @@ async function scanDependencyGraph(progress) {
     files.push({ path: rel, text: Buffer.from(bytes).toString("utf8") });
     if (progress && files.length % 200 === 0) progress.report({ message: `scanned ${files.length} files…` });
   }
+  return files;
+}
 
+/**
+ * Scan the workspace and build a dependency graph. All parsing/model logic
+ * lives in lib/depgraph.js. Returns the webview payload
+ * ({nodes, edges, cycles, stats}) already capped to RENDER_NODE_CAP.
+ */
+async function scanDependencyGraph(progress) {
+  const files = await gatherWorkspaceFiles(progress);
   const graph = depgraph.buildGraph(files);
   return capGraphForRender(graph);
 }
@@ -447,6 +459,406 @@ function panelHtml(context, webview) {
 </body></html>`;
 }
 
+// ---------------------------------------------------------------------------
+// Inline dependency-vulnerability hints (OSV.dev) — roadmap doc 15, item #1.
+//
+// All request-building / response-parsing / caching logic lives in the
+// vscode-free lib/vuln-check.js (unit-tested with mocked HTTP in
+// test/vuln-check.test.js). This section is the ONLY place that touches
+// vscode's editor/document/diagnostic/decoration APIs and the real network
+// `fetch`. Two surfaces are wired:
+//   1. Gutter icon + hover on import/require lines in the active editor
+//      (TextEditorDecorationType, per-line hoverMessage — no separate hover
+//      provider needed).
+//   2. A DiagnosticCollection for package.json dependencies/devDependencies
+//      so vulnerable deps show up in the standard Problems panel too.
+// Re-scans are debounced per document and the whole thing fails silently
+// (logged to an output channel) on any API/network error — it must never
+// crash the editor.
+// ---------------------------------------------------------------------------
+
+const VULN_DEBOUNCE_MS = 1500; // don't hit the API on every keystroke
+const VULN_CACHE_KEY = "lakshx.vulnCache";
+const VULN_CONCURRENCY = 5; // cap on simultaneous OSV detail lookups
+
+let vulnOutputChannel = null;
+let vulnDiagnostics = null;
+let vulnDecorationType = null;
+let vulnCache = null; // vuln.TTLCache, backed by globalState
+let extContext = null;
+const vulnScanTimers = new Map(); // doc uri string -> debounce timeout
+
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function severityToDiagnosticSeverity(sev) {
+  switch (sev) {
+    case "CRITICAL":
+    case "HIGH":
+      return vscode.DiagnosticSeverity.Error;
+    case "MODERATE":
+    case "MEDIUM":
+      return vscode.DiagnosticSeverity.Warning;
+    case "LOW":
+      return vscode.DiagnosticSeverity.Information;
+    default:
+      return vscode.DiagnosticSeverity.Warning;
+  }
+}
+
+function vulnHoverMarkdown(pkgName, version, entry, imprecise) {
+  const md = new vscode.MarkdownString("", true);
+  md.isTrusted = false;
+  const n = entry.vulns.length;
+  md.appendMarkdown(`**LakshX — ${pkgName}${version ? "@" + version : ""}**: ${n} known ${n === 1 ? "vulnerability" : "vulnerabilities"}\n\n`);
+  for (const v of entry.vulns.slice(0, 5)) {
+    md.appendMarkdown(`- **${v.severity}** [${v.id}](${v.url}) — ${v.summary}\n`);
+  }
+  if (n > 5) md.appendMarkdown(`- …and ${n - 5} more\n`);
+  if (imprecise) {
+    md.appendMarkdown(`\n_Installed version not resolved — showing all known advisories for \`${pkgName}\`, some may already be fixed in your installed version._`);
+  }
+  return md;
+}
+
+function initVulnCache() {
+  let stored;
+  try {
+    stored = extContext.globalState.get(VULN_CACHE_KEY);
+  } catch {
+    stored = undefined;
+  }
+  vulnCache = vuln.TTLCache.fromJSON(stored, { ttlMs: vuln.DEFAULT_TTL_MS });
+}
+
+function persistVulnCache() {
+  try {
+    extContext.globalState.update(VULN_CACHE_KEY, vulnCache.toJSON());
+  } catch (err) {
+    vulnOutputChannel.appendLine(`Failed to persist vulnerability cache: ${err && err.message ? err.message : err}`);
+  }
+}
+
+/** POSIX-relative path for a document (mirrors relPathOf(uri) for editors). */
+function relPathForDoc(doc) {
+  try {
+    return vscode.workspace.asRelativePath(doc.uri, false).split(path.sep).join("/");
+  } catch {
+    return doc.fileName || "";
+  }
+}
+
+/**
+ * Best-effort installed version lookup: read node_modules/<pkg>/package.json
+ * under each workspace folder. This is the ACCURATE source (a caret range
+ * like "^4.17.15" may have resolved to a patched 4.17.21 — trusting the range
+ * literal would false-positive). Returns undefined if not installed/found,
+ * in which case callers fall back to a name-only OSV query and label the
+ * result as imprecise.
+ */
+async function resolveInstalledVersion(pkgName) {
+  const folders = vscode.workspace.workspaceFolders || [];
+  for (const folder of folders) {
+    try {
+      const segs = pkgName.split("/");
+      const pkgJsonUri = vscode.Uri.joinPath(folder.uri, "node_modules", ...segs, "package.json");
+      const bytes = await vscode.workspace.fs.readFile(pkgJsonUri);
+      const json = JSON.parse(Buffer.from(bytes).toString("utf8"));
+      if (json && typeof json.version === "string") return json.version;
+    } catch {
+      // not installed under this folder, or unreadable/malformed — try the
+      // next workspace folder (multi-root) rather than failing the whole scan
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Extract the external package specs a document imports, reusing
+ * lib/depgraph.js (extractImports + resolveImport) rather than re-parsing.
+ * An empty fileSet means every relative import "fails" internal resolution
+ * (deliberate — we only want the package/bare imports here); unresolved
+ * relative imports come back as external with a dotted/relative raw name,
+ * which we filter out since they aren't real packages.
+ * @returns {Array<{spec:string, pkgName:string}>}
+ */
+function collectImportPackageSpecs(doc) {
+  const relPath = relPathForDoc(doc);
+  const lang = depgraph.languageOf(relPath);
+  if (!lang) return [];
+  const imports = depgraph.extractImports(doc.getText(), lang);
+  const emptyFileSet = new Set();
+  const out = [];
+  const seen = new Set();
+  for (const imp of imports) {
+    const res = depgraph.resolveImport(relPath, imp, emptyFileSet, lang);
+    if (res.type !== "external") continue;
+    if (res.name.startsWith(".")) continue; // unresolved relative import, not a package
+    const key = res.name + "|" + imp.spec;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ spec: imp.spec, pkgName: res.name });
+  }
+  return out;
+}
+
+function isPackageJsonDoc(doc) {
+  return path.basename(doc.uri.fsPath || relPathForDoc(doc)) === "package.json";
+}
+
+function isVulnScannableDoc(doc) {
+  if (doc.uri.scheme !== "file") return false;
+  if (isPackageJsonDoc(doc)) return true;
+  return depgraph.languageOf(relPathForDoc(doc)) !== null;
+}
+
+/** Gutter icon + hover for vulnerable import/require lines in one editor. */
+async function scanActiveEditorImports(editor) {
+  if (!editor || typeof fetch === "undefined") return;
+  const doc = editor.document;
+  if (isPackageJsonDoc(doc)) return; // handled by scanPackageJsonDoc (diagnostics, not decorations)
+  const specs = collectImportPackageSpecs(doc);
+  if (specs.length === 0) {
+    editor.setDecorations(vulnDecorationType, []);
+    return;
+  }
+
+  const uniquePkgs = [...new Set(specs.map((s) => s.pkgName))];
+  const versionByPkg = new Map();
+  await Promise.all(uniquePkgs.map(async (name) => versionByPkg.set(name, await resolveInstalledVersion(name))));
+  const deps = uniquePkgs.map((name) => ({ name, version: versionByPkg.get(name) }));
+
+  let results;
+  try {
+    results = await vuln.checkVulnerabilities(deps, {
+      fetchImpl: fetch,
+      cache: vulnCache,
+      concurrency: VULN_CONCURRENCY,
+      log: (msg) => vulnOutputChannel.appendLine(msg),
+    });
+  } catch (err) {
+    vulnOutputChannel.appendLine(`Import vulnerability scan failed for ${relPathForDoc(doc)}: ${err && err.message ? err.message : err}`);
+    return;
+  }
+  persistVulnCache();
+
+  const decorations = [];
+  const lineCount = doc.lineCount;
+  for (const { spec, pkgName } of specs) {
+    const version = versionByPkg.get(pkgName);
+    const entry = results.get(vuln.depKey(pkgName, version));
+    if (!entry || entry.vulns.length === 0) continue;
+    const quotedForms = [`"${spec}"`, `'${spec}'`, `\`${spec}\``];
+    const hover = vulnHoverMarkdown(pkgName, version, entry, !version);
+    for (let i = 0; i < lineCount; i++) {
+      const lineText = doc.lineAt(i).text;
+      if (!quotedForms.some((q) => lineText.includes(q))) continue;
+      decorations.push({ range: new vscode.Range(i, 0, i, lineText.length), hoverMessage: hover });
+    }
+  }
+  // Editor may have been closed/switched away while we were awaiting network
+  // calls; setDecorations on a disposed editor is a silent no-op in vscode,
+  // so no extra guard is needed here.
+  editor.setDecorations(vulnDecorationType, decorations);
+}
+
+/** Find the line declaring `"name": "..."` inside a package.json document. */
+function findDependencyLineNumber(doc, name) {
+  const re = new RegExp(`^\\s*"${escapeRegExp(name)}"\\s*:`);
+  for (let i = 0; i < doc.lineCount; i++) {
+    if (re.test(doc.lineAt(i).text)) return i;
+  }
+  return 0;
+}
+
+/** Problems-panel diagnostics for one package.json's declared dependencies. */
+// Returns the number of diagnostics set (0 on error/empty), so callers that
+// aggregate a workspace-wide count don't have to re-query
+// vscode.languages.getDiagnostics() (which mixes in diagnostics from other
+// providers, e.g. JSON-schema validation, and would over-count LakshX's hits).
+async function scanPackageJsonDoc(doc) {
+  if (typeof fetch === "undefined") return 0;
+  let manifest;
+  try {
+    manifest = JSON.parse(doc.getText());
+  } catch {
+    vulnDiagnostics.delete(doc.uri); // invalid JSON mid-edit — skip silently
+    return 0;
+  }
+  if (!manifest || typeof manifest !== "object") {
+    vulnDiagnostics.delete(doc.uri);
+    return 0;
+  }
+
+  const declared = [];
+  for (const section of ["dependencies", "devDependencies", "optionalDependencies"]) {
+    const obj = manifest[section];
+    if (!obj || typeof obj !== "object") continue;
+    for (const [name, range] of Object.entries(obj)) {
+      if (typeof range === "string") declared.push({ name, range });
+    }
+  }
+  if (declared.length === 0) {
+    vulnDiagnostics.delete(doc.uri);
+    return 0;
+  }
+
+  const versionInfo = new Map(); // name -> {version, imprecise}
+  await Promise.all(
+    declared.map(async ({ name, range }) => {
+      const installed = await resolveInstalledVersion(name);
+      if (installed) {
+        versionInfo.set(name, { version: installed, imprecise: false });
+        return;
+      }
+      const cleaned = vuln.cleanVersionSpec(range);
+      versionInfo.set(name, { version: cleaned, imprecise: true });
+    }),
+  );
+  const deps = declared.map(({ name }) => ({ name, version: versionInfo.get(name).version }));
+
+  let results;
+  try {
+    results = await vuln.checkVulnerabilities(deps, {
+      fetchImpl: fetch,
+      cache: vulnCache,
+      concurrency: VULN_CONCURRENCY,
+      log: (msg) => vulnOutputChannel.appendLine(msg),
+    });
+  } catch (err) {
+    vulnOutputChannel.appendLine(`package.json vulnerability scan failed for ${relPathForDoc(doc)}: ${err && err.message ? err.message : err}`);
+    return 0;
+  }
+  persistVulnCache();
+
+  const diagnostics = [];
+  for (const { name } of declared) {
+    const info = versionInfo.get(name);
+    const entry = results.get(vuln.depKey(name, info.version));
+    if (!entry || entry.vulns.length === 0) continue;
+    const line = findDependencyLineNumber(doc, name);
+    const range = new vscode.Range(line, 0, line, doc.lineAt(line).text.length);
+    const worst = vuln.worstSeverity(entry.vulns);
+    const idsPreview = entry.vulns
+      .slice(0, 3)
+      .map((v) => v.id)
+      .join(", ");
+    const more = entry.vulns.length > 3 ? ` +${entry.vulns.length - 3} more` : "";
+    const impreciseNote = info.imprecise ? " (installed version not resolved; showing all known advisories)" : "";
+    const diag = new vscode.Diagnostic(
+      range,
+      `LakshX: ${name} has ${entry.vulns.length} known ${entry.vulns.length === 1 ? "vulnerability" : "vulnerabilities"} (${worst}): ${idsPreview}${more}${impreciseNote}`,
+      severityToDiagnosticSeverity(worst),
+    );
+    diag.source = "LakshX";
+    diag.code = entry.vulns[0].id;
+    diagnostics.push(diag);
+  }
+  vulnDiagnostics.set(doc.uri, diagnostics);
+  return diagnostics.length;
+}
+
+async function runVulnScanForDoc(doc) {
+  try {
+    if (isPackageJsonDoc(doc)) {
+      await scanPackageJsonDoc(doc);
+      return;
+    }
+    const editor = vscode.window.visibleTextEditors.find((e) => e.document.uri.toString() === doc.uri.toString());
+    if (editor) await scanActiveEditorImports(editor);
+  } catch (err) {
+    vulnOutputChannel.appendLine(`Vulnerability scan error for ${relPathForDoc(doc)}: ${err && err.message ? err.message : err}`);
+  }
+}
+
+/** Debounced re-scan trigger — coalesces bursts of edits/saves per document. */
+function scheduleVulnScan(doc) {
+  if (!doc || !isVulnScannableDoc(doc)) return;
+  const key = doc.uri.toString();
+  const existing = vulnScanTimers.get(key);
+  if (existing) clearTimeout(existing);
+  vulnScanTimers.set(
+    key,
+    setTimeout(() => {
+      vulnScanTimers.delete(key);
+      runVulnScanForDoc(doc);
+    }, VULN_DEBOUNCE_MS),
+  );
+}
+
+/** Manual full-workspace vulnerability scan (command + status bar item). */
+async function runFullWorkspaceVulnScan() {
+  if (typeof fetch === "undefined") {
+    vscode.window.showWarningMessage("LakshX: vulnerability scanning needs a fetch-capable runtime, which isn't available here.");
+    return;
+  }
+  if (!vscode.workspace.workspaceFolders || vscode.workspace.workspaceFolders.length === 0) {
+    vscode.window.showInformationMessage("LakshX: open a folder/workspace to scan for vulnerable dependencies.");
+    return;
+  }
+
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: "LakshX: scanning dependencies for known vulnerabilities (OSV.dev)", cancellable: false },
+    async (progress) => {
+      // 1) every package.json in the workspace (bounded by SCAN_MAX_FILES) —
+      // populates the Problems panel for files that may not even be open.
+      let pkgUris = [];
+      try {
+        pkgUris = await vscode.workspace.findFiles("**/package.json", SCAN_EXCLUDE, SCAN_MAX_FILES);
+      } catch (err) {
+        vulnOutputChannel.appendLine(`Failed to enumerate package.json files: ${err && err.message ? err.message : err}`);
+      }
+      progress.report({ message: `checking ${pkgUris.length} package.json file(s)…` });
+      let pkgJsonHits = 0;
+      for (const uri of pkgUris) {
+        try {
+          const doc = await vscode.workspace.openTextDocument(uri);
+          pkgJsonHits += await scanPackageJsonDoc(doc);
+        } catch (err) {
+          vulnOutputChannel.appendLine(`Skipped ${uri.fsPath}: ${err && err.message ? err.message : err}`);
+        }
+      }
+
+      // 2) source-file imports across the workspace — reuses depgraph's
+      // existing bounded scan (gatherWorkspaceFiles: SCAN_MAX_FILES /
+      // SCAN_MAX_BYTES) and buildGraph's import extraction/resolution rather
+      // than re-parsing anything here.
+      progress.report({ message: "scanning source file imports…" });
+      let vulnerableCount = 0;
+      try {
+        const files = await gatherWorkspaceFiles(progress);
+        const graph = depgraph.buildGraph(files);
+        const uniqueNames = [...new Set(graph.nodes.filter((n) => n.type === "external").map((n) => n.path))];
+        const versionByPkg = new Map();
+        await Promise.all(uniqueNames.map(async (name) => versionByPkg.set(name, await resolveInstalledVersion(name))));
+        const deps = uniqueNames.map((name) => ({ name, version: versionByPkg.get(name) }));
+        const results = await vuln.checkVulnerabilities(deps, {
+          fetchImpl: fetch,
+          cache: vulnCache,
+          concurrency: VULN_CONCURRENCY,
+          log: (msg) => vulnOutputChannel.appendLine(msg),
+        });
+        persistVulnCache();
+        vulnerableCount = [...results.values()].filter((e) => e.vulns.length > 0).length;
+      } catch (err) {
+        vulnOutputChannel.appendLine(`Full-workspace import vulnerability scan failed: ${err && err.message ? err.message : err}`);
+      }
+
+      vscode.window.showInformationMessage(
+        vulnerableCount > 0 || pkgJsonHits > 0
+          ? `LakshX: found known vulnerabilities in ${vulnerableCount} imported package(s) and ${pkgJsonHits} manifest entr${pkgJsonHits === 1 ? "y" : "ies"}. See the Problems panel; re-open source files for inline hints.`
+          : "LakshX: no known vulnerabilities found across scanned dependencies.",
+      );
+
+      // Refresh inline decorations for whatever's currently visible.
+      for (const editor of vscode.window.visibleTextEditors) {
+        await scanActiveEditorImports(editor);
+      }
+    },
+  );
+}
+
 function activate(context) {
   // Status bar entry point — previously this panel was ONLY reachable via
   // editor/title (and only then when `editorHasCallHierarchyProvider` is
@@ -471,14 +883,63 @@ function activate(context) {
   depStatusItem.command = "lakshx.showDependencyGraph";
   depStatusItem.show();
 
+  // Vulnerability-scan entry point — third item in the same right-aligned
+  // cluster, priority 995 (right after Dep Graph's 996). Triggers the manual
+  // full-workspace OSV scan; inline gutter/hover hints and the package.json
+  // Problems-panel diagnostics run automatically/debounced without needing
+  // this, but it's the explicit "scan everything now" affordance.
+  const vulnStatusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 995);
+  vulnStatusItem.text = "$(shield) Vuln Scan";
+  vulnStatusItem.tooltip = "LakshX: Scan workspace dependencies for known vulnerabilities (OSV.dev)";
+  vulnStatusItem.command = "lakshx.graph.scanVulnerabilities";
+  vulnStatusItem.show();
+
+  // --- Vulnerability-hint wiring -------------------------------------------
+  extContext = context;
+  vulnOutputChannel = vscode.window.createOutputChannel("LakshX: Vulnerability Scan");
+  vulnDiagnostics = vscode.languages.createDiagnosticCollection("lakshxVuln");
+  vulnDecorationType = vscode.window.createTextEditorDecorationType({
+    gutterIconPath: vscode.Uri.joinPath(context.extensionUri, "media", "vuln-gutter.svg"),
+    gutterIconSize: "contain",
+    overviewRulerColor: new vscode.ThemeColor("editorError.foreground"),
+    overviewRulerLane: vscode.OverviewRulerLane.Right,
+  });
+  initVulnCache();
+
+  if (typeof fetch === "undefined") {
+    vulnOutputChannel.appendLine("No global `fetch` available in this runtime — vulnerability lookups are disabled.");
+  }
+
+  // Scan the currently active editor (and any already-open package.json) once
+  // on startup, then let the debounced listeners below keep things fresh.
+  if (vscode.window.activeTextEditor) scheduleVulnScan(vscode.window.activeTextEditor.document);
+  for (const doc of vscode.workspace.textDocuments) {
+    if (isPackageJsonDoc(doc)) scheduleVulnScan(doc);
+  }
+
   context.subscriptions.push(
     vscode.commands.registerCommand("lakshx.showCallGraph", () => showCallGraph(context)),
     vscode.commands.registerCommand("lakshx.showDependencyGraph", () => showDependencyGraph(context)),
+    vscode.commands.registerCommand("lakshx.graph.scanVulnerabilities", () => runFullWorkspaceVulnScan()),
+    vscode.workspace.onDidOpenTextDocument((doc) => scheduleVulnScan(doc)),
+    vscode.workspace.onDidSaveTextDocument((doc) => scheduleVulnScan(doc)),
+    vscode.workspace.onDidChangeTextDocument((e) => scheduleVulnScan(e.document)),
+    vscode.window.onDidChangeActiveTextEditor((editor) => {
+      if (editor) scheduleVulnScan(editor.document);
+    }),
     statusItem,
     depStatusItem,
+    vulnStatusItem,
+    vulnOutputChannel,
+    vulnDiagnostics,
+    vulnDecorationType,
   );
 }
 
-function deactivate() {}
+function deactivate() {
+  for (const t of vulnScanTimers.values()) clearTimeout(t);
+  vulnScanTimers.clear();
+  if (vulnCache && extContext) persistVulnCache();
+}
 
 module.exports = { activate, deactivate };
