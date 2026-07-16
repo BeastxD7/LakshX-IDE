@@ -1,0 +1,64 @@
+{
+  "name": "lakshx-secrets",
+  "displayName": "LakshX Secrets",
+  "description": "Offline pre-commit secret scanning — Gitleaks-style regex + entropy detection, a baseline/allowlist file, and an opt-in real git pre-commit hook. Fully local, zero network calls.",
+  "version": "0.0.1",
+  "publisher": "lakshx",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.128.0"
+  },
+  "main": "./extension.js",
+  "scripts": {
+    "test:unit": "node --test test/*.test.js"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "lakshx.secrets.scanWorkspace",
+        "title": "LakshX: Scan Workspace for Secrets",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "lakshx.secrets.scanStaged",
+        "title": "LakshX: Scan Staged Changes for Secrets (Pre-Commit)",
+        "icon": "$(git-commit)"
+      },
+      {
+        "command": "lakshx.secrets.acknowledgeFinding",
+        "title": "LakshX: Acknowledge Secret Finding (Add to Baseline)"
+      },
+      {
+        "command": "lakshx.secrets.installPreCommitHook",
+        "title": "LakshX: Install Real Git Pre-Commit Hook for Secret Scanning (Opt-In)"
+      },
+      {
+        "command": "lakshx.secrets.uninstallPreCommitHook",
+        "title": "LakshX: Uninstall LakshX Git Pre-Commit Hook"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "lakshx.secrets.scanWorkspace"
+        },
+        {
+          "command": "lakshx.secrets.scanStaged"
+        },
+        {
+          "command": "lakshx.secrets.acknowledgeFinding",
+          "when": "false"
+        },
+        {
+          "command": "lakshx.secrets.installPreCommitHook"
+        },
+        {
+          "command": "lakshx.secrets.uninstallPreCommitHook"
+        }
+      ]
+    }
+  }
+}
