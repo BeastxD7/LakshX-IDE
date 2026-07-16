@@ -900,13 +900,308 @@ document.addEventListener("click", (e) => {
   if (mentionActive && !mentionPopup.contains(e.target) && e.target !== inputEl) closeMention();
 });
 
+// ---------- slash commands (Royal Mode 2.0 Stage 1b — docs/research/12) ----------
+// Structure deliberately cloned from the @-mention machinery above: same
+// popup chrome (.mention-popup / .mention-item CSS), same open/render/pick/
+// close state machine, same capture-phase keyboard nav. Differences: it only
+// triggers when "/" is the FIRST character of the input (never mid-text),
+// the item list is local (built-ins) + extension-provided (custom .md
+// commands) instead of a searchFiles round-trip, and picking either executes
+// immediately (no-arg built-ins) or completes the token (commands that take
+// arguments), with actual execution living in runSlashCommand() on send.
+const slashPopup = document.getElementById("slashPopup");
+let customCommands = []; // [{name, description, source}] — pushed by extension.js ("commands" message)
+let slashActive = false;
+let slashQuery = "";
+let slashItems = [];
+let slashIndex = 0;
+
+// takesArgs: picking from the popup completes "/name " instead of executing,
+// so the user can type the argument; run() executes (args may be "").
+const BUILTIN_COMMANDS = [
+  { name: "plan", description: "Switch to Review mode — research first, produce a plan", takesArgs: false, run: () => switchMode("review") },
+  { name: "approve", description: "Switch to Approve mode — edits ask for your OK", takesArgs: false, run: () => switchMode("approve") },
+  { name: "auto", description: "Switch to Auto mode — the agent acts without asking", takesArgs: false, run: () => switchMode("auto") },
+  { name: "royal", description: "Switch to Royal mode — full autonomy (consent gate applies)", takesArgs: false, run: () => switchMode("royal") },
+  { name: "model", description: "/model <name> — switch model; bare /model focuses the picker", takesArgs: true, run: (args) => slashModel(args) },
+  { name: "new", description: "Start a new chat", takesArgs: false, run: () => vscode.postMessage({ type: "newChat" }) },
+  { name: "undo", description: "Undo the last turn's file changes", takesArgs: false, run: () => slashUndo() },
+  { name: "report", description: "Copy the full diagnostic session report to the clipboard", takesArgs: false, run: () => slashReport() },
+  { name: "help", description: "List all slash commands", takesArgs: false, run: () => renderSlashHelp() },
+];
+
+/** Built-ins + customs (built-in names win a clash), for both the popover and /help. */
+function allSlashCommands() {
+  const builtinNames = new Set(BUILTIN_COMMANDS.map((c) => c.name));
+  const customs = customCommands.filter((c) => !builtinNames.has(c.name.toLowerCase()));
+  return [
+    ...BUILTIN_COMMANDS.map((c) => ({ ...c, source: "built-in" })),
+    ...customs.map((c) => ({ name: c.name, description: c.description || "Custom command", source: c.source, takesArgs: true, custom: true })),
+  ];
+}
+
+// Transient confirmation pill above the composer (there was no toast
+// machinery before this; system chat messages are too heavy for "mode
+// switched" acks and the .fb-note pattern is anchored to a button).
+let toastTimer = null;
+function toast(text) {
+  let el = document.getElementById("toast");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "toast";
+    document.querySelector(".input-wrap").appendChild(el);
+  }
+  el.textContent = text;
+  el.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.hidden = true; }, 2200);
+}
+
+/** All four mode commands reuse the mode select's exact message — royal still hits extension.js's consent gate ("setMode" handler), never bypassed. */
+function switchMode(mode) {
+  vscode.postMessage({ type: "setMode", mode });
+  toast(`Switching to ${mode} mode…`);
+}
+
+function slashModel(args) {
+  if (!args) {
+    modelEl.focus();
+    toast("Pick a model");
+    return;
+  }
+  const q = args.toLowerCase();
+  const opts = [...modelEl.options].map((o) => o.value);
+  // exact > "model id without provider prefix" > substring — same forgiving
+  // spirit as the mention popup's fuzzy match, without false positives.
+  const match =
+    opts.find((v) => v.toLowerCase() === q) ||
+    opts.find((v) => v.toLowerCase().endsWith(`/${q}`)) ||
+    opts.find((v) => v.toLowerCase().includes(q));
+  if (!match) {
+    toast(`No model matching "${args}"`);
+    return;
+  }
+  modelEl.value = match;
+  vscode.postMessage({ type: "setModel", model: match }); // same path the select's own change handler uses
+  toast(`Model: ${match}`);
+}
+
+function slashUndo() {
+  // checkpointCards is insertion-ordered and fully-reverted turns are
+  // deleted from it, so its last key is the most recent turn that still has
+  // undoable file changes. Same "never offer a zero-file undo" rule the
+  // cards/bar follow.
+  const ids = [...checkpointCards.keys()];
+  if (!ids.length) {
+    toast("No file changes to undo");
+    return;
+  }
+  requestUndoPrompt(ids[ids.length - 1]);
+}
+
+function slashReport() {
+  if (diagBtn.disabled) return; // a copy is already in flight
+  diagBtn.disabled = true; // "diagnosticsCopied" re-enables it and shows the note, same as a button click
+  vscode.postMessage({ type: "copyDiagnostics" });
+}
+
+/**
+ * /help — rendered locally, styled like a system message. DELIBERATELY
+ * ephemeral (not persisted, gone after a reload/replay): the webview cannot
+ * append to the extension's transcript itself, and a round-trip just to
+ * durably store what is on-demand UI chrome (not conversation content) isn't
+ * worth it — replay safety is preserved by keeping it out of the transcript
+ * entirely rather than by making it replayable.
+ */
+function renderSlashHelp() {
+  clearEmpty();
+  const el = document.createElement("div");
+  el.className = "msg system slash-help";
+  const title = document.createElement("div");
+  title.className = "help-title";
+  title.textContent = "Slash commands";
+  el.appendChild(title);
+  for (const c of allSlashCommands()) {
+    const row = document.createElement("div");
+    row.className = "help-row";
+    const name = document.createElement("span");
+    name.className = "help-name";
+    name.textContent = `/${c.name}`;
+    const desc = document.createElement("span");
+    desc.className = "help-desc";
+    desc.textContent = c.description;
+    row.append(name, desc);
+    if (c.source !== "built-in") {
+      const src = document.createElement("span");
+      src.className = "help-src";
+      src.textContent = c.source;
+      row.appendChild(src);
+    }
+    el.appendChild(row);
+  }
+  const foot = document.createElement("div");
+  foot.className = "help-foot";
+  foot.textContent = "Custom commands: add .md files to .lakshx/commands/ (workspace or home). $ARGUMENTS in the body is replaced by what you type after the name.";
+  el.appendChild(foot);
+  messagesEl.appendChild(el);
+  scrollBottom();
+}
+
+function closeSlash() {
+  slashActive = false;
+  slashPopup.hidden = true;
+  slashPopup.innerHTML = "";
+}
+
+function openSlash(query) {
+  if (!slashActive) {
+    slashActive = true;
+    vscode.postMessage({ type: "refreshCommands" }); // re-scan .lakshx/commands so the list is never stale
+  }
+  slashQuery = query;
+  renderSlashResults();
+}
+
+function renderSlashResults() {
+  const q = slashQuery.toLowerCase();
+  const all = allSlashCommands();
+  // prefix matches first (the expected completion), substring matches after
+  const prefix = all.filter((c) => c.name.toLowerCase().startsWith(q));
+  const rest = all.filter((c) => !c.name.toLowerCase().startsWith(q) && c.name.toLowerCase().includes(q));
+  slashItems = [...prefix, ...rest];
+  slashIndex = 0;
+  if (!slashItems.length) {
+    slashPopup.innerHTML = `<div class="mention-empty">No matching commands</div>`;
+    slashPopup.hidden = false;
+    return;
+  }
+  slashPopup.innerHTML = slashItems
+    .map((_, i) => `<div class="mention-item slash-item${i === 0 ? " active" : ""}"><span class="slash-name"></span><span class="slash-desc"></span><span class="slash-src"></span></div>`)
+    .join("");
+  [...slashPopup.querySelectorAll(".slash-item")].forEach((el, i) => {
+    const c = slashItems[i];
+    el.querySelector(".slash-name").textContent = `/${c.name}`;
+    el.querySelector(".slash-desc").textContent = c.description;
+    el.querySelector(".slash-src").textContent = c.source === "built-in" ? "" : c.source;
+    el.addEventListener("mousedown", (e) => { e.preventDefault(); pickSlash(i); });
+  });
+  slashPopup.hidden = false;
+}
+
+function pickSlash(i) {
+  const c = slashItems[i];
+  if (c === undefined) return;
+  if (!c.takesArgs) {
+    // no-arg built-in: picking IS running it (a second Enter to send an
+    // already-complete "/plan" would just be friction)
+    closeSlash();
+    inputEl.value = "";
+    c.run("");
+    return;
+  }
+  // argument-taking command: complete the token ("/model " / "/fix-issue ")
+  // and let the user type args; Enter then routes through send() below.
+  const after = inputEl.value.slice(1 + slashQuery.length);
+  const token = `/${c.name} `;
+  inputEl.value = token + after;
+  inputEl.focus();
+  inputEl.setSelectionRange(token.length, token.length);
+  closeSlash();
+}
+
+function updateSlashHighlight() {
+  [...slashPopup.querySelectorAll(".slash-item")].forEach((el, i) => el.classList.toggle("active", i === slashIndex));
+  slashPopup.querySelector(".slash-item.active")?.scrollIntoView({ block: "nearest" });
+}
+
+/**
+ * Execute "/name args" typed into the composer (send() routes here).
+ * Returns true if it was handled as a command (input should be cleared),
+ * false if send() should treat the text as a normal message.
+ */
+function runSlashCommand(name, args) {
+  const lower = name.toLowerCase();
+  const builtin = BUILTIN_COMMANDS.find((c) => c.name === lower);
+  if (builtin) {
+    builtin.run(args);
+    return true;
+  }
+  const custom = customCommands.find((c) => c.name.toLowerCase() === lower);
+  if (custom) {
+    if (busy) {
+      toast("Agent is busy — wait for the turn to finish");
+      return false;
+    }
+    // extension.js expands the .md template and sends it through the normal
+    // sendPrompt path (renders + persists + replays as a plain user turn).
+    vscode.postMessage({ type: "runCommand", name: custom.name, args });
+    return true;
+  }
+  return false;
+}
+
+inputEl.addEventListener("input", () => {
+  const v = inputEl.value;
+  const caret = inputEl.selectionStart;
+  // only at position 0 of the input, and only while the caret is still
+  // inside the first whitespace-free token — "/" mid-text never triggers,
+  // and typing a space (starting the args) dismisses the popover.
+  if (v[0] !== "/" || caret < 1) { closeSlash(); return; }
+  const token = v.slice(1, caret);
+  if (/\s/.test(token)) { closeSlash(); return; }
+  openSlash(token);
+});
+
+// capture-phase, same registration pattern (and reason) as the mention
+// popup's keyboard nav above — must pre-empt inputEl's own Enter-to-send.
+document.addEventListener(
+  "keydown",
+  (e) => {
+    if (e.target !== inputEl || !slashActive) return;
+    if (e.key === "ArrowDown") { e.preventDefault(); e.stopPropagation(); slashIndex = Math.min(slashIndex + 1, slashItems.length - 1); updateSlashHighlight(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); e.stopPropagation(); slashIndex = Math.max(slashIndex - 1, 0); updateSlashHighlight(); }
+    else if (e.key === "Enter" || e.key === "Tab") {
+      if (!slashItems.length) { closeSlash(); return; } // nothing to pick — let Enter fall through to send() (unknown-command toast)
+      e.preventDefault(); e.stopPropagation(); pickSlash(slashIndex);
+    }
+    else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeSlash(); }
+  },
+  true,
+);
+document.addEventListener("click", (e) => {
+  if (slashActive && !slashPopup.contains(e.target) && e.target !== inputEl) closeSlash();
+});
+
 // ---------- send ----------
 function send() {
   const text = inputEl.value.trim();
-  if (busy || (!text && attachments.length === 0)) return;
+  if (!text && attachments.length === 0) return;
+  // Slash-command interception — BEFORE the busy guard, deliberately: the
+  // built-ins are side-channel actions (mode switch, /report on a hung
+  // session — its whole reason to exist, /undo, /help) that must work while
+  // a turn is in flight, exactly like their button/select equivalents do.
+  // Custom commands DO respect busy (checked in runSlashCommand) since they
+  // start a real turn.
+  if (text[0] === "/") {
+    const m = text.match(/^\/(\S+)([\s\S]*)$/);
+    if (m && runSlashCommand(m[1], m[2].trim())) {
+      inputEl.value = "";
+      closeSlash();
+      return;
+    }
+    // Unknown "/token": if it LOOKS like a command attempt (bare word), warn
+    // instead of sending a typo to the agent; anything else (e.g. a pasted
+    // absolute path like /Users/…) falls through as a normal message.
+    if (m && /^[A-Za-z][A-Za-z0-9._-]*$/.test(m[1])) {
+      toast(`Unknown command: /${m[1]} — type / to see the list`);
+      return;
+    }
+  }
+  if (busy) return;
   inputEl.value = "";
   planBar.hidden = true; // typing a custom reply supersedes the plan buttons
   closeMention();
+  closeSlash();
   const atts = attachments.slice();
   clearAttachments();
   vscode.postMessage({ type: "send", text, attachments: atts }); // extension echoes back "user" for transcript
@@ -1314,6 +1609,7 @@ window.addEventListener("message", (e) => {
       lastAgentEl = null;
       clearAttachments();
       closeMention();
+      closeSlash();
       for (const ev of m.events) applyEvent(ev, true);
       flushBulk();
       if (m.events.length === 0) showEmpty();
@@ -1413,6 +1709,10 @@ window.addEventListener("message", (e) => {
     case "fileResults":
       if (mentionActive && m.seq === mentionSeq) renderMentionResults(m.files);
       break;
+    case "commands":
+      customCommands = m.commands ?? [];
+      if (slashActive) renderSlashResults(); // a refresh landed while the popover is open — re-filter live
+      break;
     case "diagnosticsCopied": {
       // Same brief inline-note pattern attachFeedback() uses for "Retrying…"
       // (panel.css .fb-note) — a small transient label next to the button,
@@ -1441,6 +1741,7 @@ window.addEventListener("message", (e) => {
       lastAgentEl = null;
       clearAttachments();
       closeMention();
+      closeSlash();
       break;
   }
 });

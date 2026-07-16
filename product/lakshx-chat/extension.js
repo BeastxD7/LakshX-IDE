@@ -7,6 +7,7 @@ const os = require("os");
 const path = require("path");
 const { CHANGELOG } = require("./changelog.js");
 const diagnostics = require("./diagnostics.js");
+const { discoverCommands, expandCommandBody } = require("./commands.js");
 const { AcpClient } = require("./acp-client.js");
 
 // ---------- runtime discovery ----------
@@ -424,6 +425,7 @@ class AgentViewProvider {
     this.chatTitle = null;
     this.mode = "review";
     this.currentModel = null; // best-effort, for feedback-log context only
+    this.customCommands = []; // discovered .lakshx/commands/*.md — see refreshCustomCommands()
     this.remote = null; // RemoteServer instance, only set while "LakshX: Enable Remote Access" is on
     this.turnInProgress = false; // set for the duration of a session/prompt turn — see sendPrompt(); the one guard
     // shared by the desktop composer and the phone's POST /control/send so the two can't race each other into two
@@ -1039,11 +1041,55 @@ class AgentViewProvider {
     });
   }
 
+  // ---------- custom slash commands (Royal Mode 2.0 Stage 1b, docs/research/12) ----------
+  // Discovery + templating live in commands.js (pure, unit-tested); this
+  // side only decides WHERE to look (workspace dir first — it wins name
+  // clashes over ~/.lakshx) and ships the result to the popover. Bodies stay
+  // extension-side: the webview only ever sees {name, description, source},
+  // and asks for execution by name ("runCommand" below), which re-scans so a
+  // just-edited .md file runs its current content without a reload.
+  commandSources() {
+    const sources = [];
+    const root = workspaceRoot();
+    if (root) sources.push({ dir: path.join(root, ".lakshx", "commands"), source: "workspace" });
+    sources.push({ dir: path.join(os.homedir(), ".lakshx", "commands"), source: "user" });
+    return sources;
+  }
+
+  refreshCustomCommands() {
+    this.customCommands = discoverCommands(this.commandSources());
+    // pure UI state — deliberately NOT post(): not a transcript event, not
+    // replayable, not mirrored to a paired phone (the phone has no composer
+    // popover to feed).
+    this.view?.webview.postMessage({
+      type: "commands",
+      commands: this.customCommands.map((c) => ({ name: c.name, description: c.description, source: c.source })),
+    });
+  }
+
   async onWebviewMessage(m) {
     switch (m.type) {
       case "send":
         await this.sendPrompt(m.text, m.attachments);
         break;
+      case "refreshCommands":
+        this.refreshCustomCommands();
+        break;
+      case "runCommand": {
+        // A custom command IS a normal user turn — expandCommandBody's
+        // result goes through the exact same sendPrompt path the composer
+        // uses, so it renders as a user message, persists/replays as one,
+        // and starts a turn. Only the text differs.
+        this.customCommands = discoverCommands(this.commandSources()); // pick up on-disk edits since the last scan
+        const name = String(m.name ?? "").toLowerCase();
+        const cmd = this.customCommands.find((c) => c.name.toLowerCase() === name);
+        if (!cmd) {
+          this.view?.webview.postMessage({ type: "system", text: `Unknown command: /${m.name}` });
+          break;
+        }
+        await this.sendPrompt(expandCommandBody(cmd.body, m.args));
+        break;
+      }
       case "permissionChoice": {
         const w = this.permissionWaiters.get(m.id);
         if (w) {
@@ -1340,6 +1386,10 @@ class AgentViewProvider {
         const providers = PROVIDER_IDS.filter((id) => state.set[id]);
         this.currentModel ??= state.defaultModel;
         this.post({ type: "ready", models: { defaultModel: state.defaultModel, providers } });
+        // webview-ready is also when the slash-command popover gets its
+        // initial command list (spec: scan on webview ready + on any
+        // "refreshCommands"). Cheap local dir scan, no process spawn.
+        this.refreshCustomCommands();
         break;
       }
       case "copyDiagnostics": {
@@ -1454,7 +1504,8 @@ ${hasMd ? `<link rel="stylesheet" href="${mdcss}">` : ""}
     </div>
     <div class="input-wrap">
       <div id="mentionPopup" class="mention-popup" hidden></div>
-      <textarea id="input" rows="3" placeholder="Describe a task. Type @ to reference a file. Review mode plans first; Approve executes with your OK."></textarea>
+      <div id="slashPopup" class="mention-popup" hidden></div>
+      <textarea id="input" rows="3" placeholder="Describe a task. Type @ to reference a file, / for commands. Review mode plans first; Approve executes with your OK."></textarea>
     </div>
     <div id="toolbar">
       <select id="model" title="Model"></select>

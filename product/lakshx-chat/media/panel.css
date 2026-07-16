@@ -719,6 +719,59 @@ html, body {
 }
 .mention-item:hover, .mention-item.active { background: var(--accent-soft); color: var(--fg); }
 .mention-empty { padding: 8px 10px; font-size: 11.5px; color: var(--faint); }
+
+/* ---------- slash-command popover (shares .mention-popup/.mention-item chrome) ---------- */
+.slash-item { display: flex; align-items: baseline; gap: 8px; }
+.slash-name { font-family: var(--mono); color: var(--fg); flex-shrink: 0; }
+.slash-desc {
+  flex: 1;
+  min-width: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.slash-src { flex-shrink: 0; font-size: 10px; color: var(--faint); }
+
+/* transient confirmation pill for slash-command acks ("Model: …", "Switching to auto mode…") */
+#toast {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-bottom: 8px;
+  max-width: 92%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--bg);
+  border: 1px solid var(--hairline);
+  border-radius: 99px;
+  padding: 5px 12px;
+  font-size: 11.5px;
+  color: var(--fg);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  z-index: 6;
+  animation: rise 0.12s var(--ease);
+}
+
+/* /help — local, ephemeral command listing styled as a left-aligned system card */
+.msg.system.slash-help {
+  text-align: left;
+  background: var(--card);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  white-space: normal;
+}
+.slash-help .help-title { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; }
+.slash-help .help-row { display: flex; align-items: baseline; gap: 8px; padding: 2px 0; }
+.slash-help .help-name { font-family: var(--mono); font-size: 12px; color: var(--fg); min-width: 88px; flex-shrink: 0; }
+.slash-help .help-desc { color: var(--muted); }
+.slash-help .help-src { color: var(--faint); font-size: 10px; flex-shrink: 0; }
+.slash-help .help-foot { margin-top: 8px; color: var(--faint); font-size: 11px; }
 #toolbar { display: flex; align-items: center; gap: 6px; }
 #toolbar > button { flex-shrink: 0; }
 .spacer { flex: 1; min-width: 0; }
