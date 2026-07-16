@@ -138,3 +138,20 @@ boundary compaction), runaway verify-fix loops (2-round cap + rewind),
 self-grading (fresh-context critics), verification gaming (frozen spec
 hash + tamper watch), flaky gates (built server, console allowlists,
 deterministic waits), critic over-engineering (correctness-only rubric).
+
+## External validation (2026-07-17, round-2 feature research)
+
+Anthropic shipped `/goal` in Claude Code v2.1.139 (May 2026): a Stop-hook
+where a separate, smaller model judges a user-written completion condition
+against the transcript, on the explicit principle that "the writer is not
+also the grader." But their evaluator **only reads the transcript — it
+never runs tools or commands**, so a worker that fabricates "tests passed"
+in its own output text can, in principle, fool the grader. This design's
+`declare_done` re-running verification **server-side, harness-executed**
+(§12.3 above) is strictly more rigorous than what shipped there — keep it
+that way; do not weaken it toward transcript-only judging for simplicity.
+Anthropic's June 2026 subagent grader-revise loop (a lead agent sending
+subagents back to revise until a rubric passes) also independently
+converges on this doc's typed-role revise-loop design. Treat both as
+external corroboration the INTAKE→RECON→PLAN→EXECUTE→VERIFY direction is
+right, not as a reason to imitate their weaker verification model.
