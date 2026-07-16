@@ -691,6 +691,109 @@ function applySubagentsEnd(m) {
   scrollBottom();
 }
 
+// ---------- live royal-mode phase/checklist card (Royal Mode 2.0 Stage B) ----------
+// A single persistent card (not a Map keyed by id, unlike checkpoints/
+// subagents/background tasks — there is at most ONE phase machine live per
+// turn), updated in place on every `lakshx/phase_state` notification
+// (agent/src/loop.ts's `runRoyalPhaseTurn`). Reuses `.checkpoint`'s card
+// chrome and `.dot`'s running/done/failed status-dot language (same visual
+// vocabulary the subagent card above and the checkpoint card use) rather
+// than inventing a new design — a "pending" dot variant is the one new
+// visual state, styled in panel.css next to the existing dot classes.
+let phaseCard = null; // {el, headLabelEl, bodyEl, chevronEl, tasksEl, verifyEl, setExpanded}
+
+const PHASE_LABELS = {
+  intake: "Intake",
+  recon: "Recon",
+  plan: "Plan",
+  execute: "Execute",
+  verify: "Verify",
+  fix: "Fix",
+  rewind: "Rewind",
+  done: "Done",
+};
+
+function ensurePhaseCard() {
+  if (phaseCard) return phaseCard;
+  clearEmpty();
+  endStream();
+  document.getElementById("thinking")?.remove();
+  const el = document.createElement("div");
+  el.className = "checkpoint phase-card";
+  el.innerHTML = `
+    <div class="ph-head" role="button" tabindex="0">
+      <span class="ph-head-label"></span><span class="cpbar-chevron">▾</span>
+    </div>
+    <div class="ph-body">
+      <div class="ph-tasks"></div>
+      <div class="ph-verify" hidden></div>
+    </div>`;
+  const bodyEl = el.querySelector(".ph-body");
+  const headLabelEl = el.querySelector(".ph-head-label");
+  const chevronEl = el.querySelector(".cpbar-chevron");
+  const tasksEl = el.querySelector(".ph-tasks");
+  const verifyEl = el.querySelector(".ph-verify");
+  let expanded = true;
+  const applyExpanded = () => {
+    bodyEl.hidden = !expanded;
+    chevronEl.textContent = expanded ? "▾" : "▸";
+  };
+  applyExpanded();
+  el.querySelector(".ph-head").addEventListener("click", () => {
+    expanded = !expanded;
+    applyExpanded();
+  });
+  messagesEl.appendChild(el);
+  phaseCard = { el, headLabelEl, bodyEl, chevronEl, tasksEl, verifyEl, setExpanded: (v) => { expanded = v; applyExpanded(); } };
+  scrollBottom();
+  return phaseCard;
+}
+
+/** Per-task status dot: pending (dim, not yet started) / running (in_progress, pulsing) / done / failed — same dot vocabulary as `.tool`/subagent rows. */
+function phaseTaskDotClass(status) {
+  if (status === "done") return "done";
+  if (status === "failed") return "failed";
+  if (status === "in_progress") return "running";
+  return "pending";
+}
+
+function renderPhaseTasks(card, taskList, currentTaskId) {
+  card.tasksEl.innerHTML = "";
+  for (const t of taskList ?? []) {
+    const row = document.createElement("div");
+    row.className = "ph-task";
+    row.innerHTML = `<span class="dot ${phaseTaskDotClass(t.status)}"></span><span class="ph-task-title"></span>`;
+    row.querySelector(".ph-task-title").textContent = t.title + (t.id === currentTaskId ? " — current" : "");
+    card.tasksEl.appendChild(row);
+  }
+}
+
+function applyPhaseState(m) {
+  const card = ensurePhaseCard();
+  const label = PHASE_LABELS[m.phase] || m.phase;
+  const doneCount = (m.taskList ?? []).filter((t) => t.status === "done").length;
+  const taskSuffix = m.taskList?.length ? ` (${doneCount}/${m.taskList.length} tasks)` : "";
+  card.headLabelEl.textContent = `Royal mode — ${label}${taskSuffix}`;
+  renderPhaseTasks(card, m.taskList, m.currentTaskId);
+
+  if (m.verificationResult) {
+    card.verifyEl.hidden = false;
+    const v = m.verificationResult;
+    const checks = (v.results ?? []).map((r) => `${r.passed ? "✓" : "✗"} ${r.cmd}`).join(", ");
+    card.verifyEl.textContent = v.passed
+      ? `Verification passed${checks ? ": " + checks : ""}`
+      : `Verification failed${checks ? ": " + checks : v.note ? " — " + v.note : ""}`;
+    card.verifyEl.classList.toggle("ph-verify-fail", !v.passed);
+  } else {
+    card.verifyEl.hidden = true;
+  }
+
+  // A finished run collapses by default (same "collapse once done" shape the
+  // subagent card and composer checkpoint bar already use) — still togglable
+  // via the header click handler above.
+  if (m.phase === "done") card.setExpanded(false);
+}
+
 // ---------- composer-anchored "files changed this session" summary bar ----------
 // Collapsed by default ("Files changed this session (N)"); expands to a flat,
 // latest-wins-per-path file list with the same per-file Undo + Open-diff
@@ -1955,6 +2058,7 @@ function applyEvent(m, replaying) {
     case "subagentsStart": applySubagentsStart(m); break;
     case "subagentActivity": applySubagentActivity(m); break;
     case "subagentsEnd": applySubagentsEnd(m); break;
+    case "phaseState": applyPhaseState(m); break;
     case "taskStart": applyTaskStart(m); break;
     case "taskActivity": applyTaskActivity(m); break;
     case "taskDone": applyTaskDone(m); break;
@@ -2094,6 +2198,7 @@ window.addEventListener("message", (e) => {
       tools.clear();
       checkpointCards.clear();
       subagentCards.clear();
+      phaseCard = null;
       bgTasks.clear();
       trayExpanded = false;
       renderTray(); // hides the tray before replay repopulates it; a "tasksReconcile" may follow separately
@@ -2143,6 +2248,7 @@ window.addEventListener("message", (e) => {
     case "subagentsStart": applyEvent(m, false); break;
     case "subagentActivity": applyEvent(m, false); break;
     case "subagentsEnd": applyEvent(m, false); break;
+    case "phaseState": applyEvent(m, false); break;
     case "taskStart": applyEvent(m, false); break;
     case "taskActivity": applyEvent(m, false); break;
     case "taskDone": applyEvent(m, false); break;
@@ -2242,6 +2348,7 @@ window.addEventListener("message", (e) => {
       tools.clear();
       checkpointCards.clear();
       subagentCards.clear();
+      phaseCard = null;
       bgTasks.clear();
       trayExpanded = false;
       renderTray();

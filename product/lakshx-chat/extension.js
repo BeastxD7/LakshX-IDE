@@ -302,7 +302,7 @@ async function searchWorkspaceFiles(q) {
 // (panel.js) rebuilds on reload, then gets reconciled against the live
 // registry via a "tasksReconcile" round-trip (NOT itself replayable — see
 // the "replayRequest" handler below).
-const REPLAYABLE = new Set(["user", "chunk", "thought", "tool", "toolUpdate", "toolImage", "system", "modeChanged", "turnEnd", "checkpoint", "checkpointReverted", "rewindAccepted", "subagentsStart", "subagentActivity", "subagentsEnd", "taskStart", "taskActivity", "taskDone", "taskSteered"]);
+const REPLAYABLE = new Set(["user", "chunk", "thought", "tool", "toolUpdate", "toolImage", "system", "modeChanged", "turnEnd", "checkpoint", "checkpointReverted", "rewindAccepted", "subagentsStart", "subagentActivity", "subagentsEnd", "taskStart", "taskActivity", "taskDone", "taskSteered", "phaseState"]);
 
 function chatsDir() {
   const dir = path.join(os.homedir(), ".lakshx", "chats");
@@ -777,6 +777,7 @@ class AgentViewProvider {
         if (method === "lakshx/subagents_start") this.onSubagentsStart(params);
         if (method === "lakshx/subagent_activity") this.onSubagentActivity(params);
         if (method === "lakshx/subagents_end") this.onSubagentsEnd(params);
+        if (method === "lakshx/phase_state") this.onPhaseState(params);
         if (method === "lakshx/tool_input_delta") this.onToolInputDelta(params);
         if (method === "lakshx/tool_image") this.onToolImage(params);
         if (method === "lakshx/task_start") this.onTaskStart(params);
@@ -912,6 +913,27 @@ class AgentViewProvider {
 
   onSubagentsEnd(params) {
     this.post({ type: "subagentsEnd", batchId: params.batchId, results: params.results });
+  }
+
+  /**
+   * `lakshx/phase_state` (agent/src/loop.ts's `runRoyalPhaseTurn` — Royal
+   * Mode 2.0 Stage B) — fired on every phase transition and task-status
+   * change during a top-level royal turn. Same pure-relay pattern as
+   * `onSubagentsStart` et al above: panel.js's phase card does the actual
+   * rendering, keyed by there being at most one live phase machine per turn
+   * (no batchId needed, unlike subagents/background tasks).
+   */
+  onPhaseState(params) {
+    this.post({
+      type: "phaseState",
+      phase: params.phase,
+      taskList: params.taskList,
+      currentTaskId: params.currentTaskId,
+      fixRound: params.fixRound,
+      planReentries: params.planReentries,
+      verificationResult: params.verificationResult,
+      note: params.note,
+    });
   }
 
   /**

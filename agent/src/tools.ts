@@ -745,4 +745,106 @@ export const TOOLS: ToolSpec[] = [
   },
 ];
 
-export const toolByName = new Map(TOOLS.map((t) => [t.name, t]));
+// ---- Royal Mode 2.0 Stage B: phase-transition tools ----
+// Deliberately a SEPARATE array, never merged into `TOOLS` above: `TOOLS` (or
+// `TOOLS.filter(!dangerous)`) is what review/approve/auto/royal all pass as
+// `allowedTools` for their normal (non-phase) turns (loop.ts's `runPrompt`),
+// so folding these in there would silently add three new tools to EVERY
+// mode's schema — a real behavior change for review/approve/auto, which the
+// task requires stay byte-for-byte unaffected. Instead, `runRoyalPhaseTurn`
+// (loop.ts) builds each phase-turn's own `allowedTools` explicitly from
+// `TOOLS` plus exactly the one phase tool that turn needs, so only a
+// top-level ROYAL session's phase-machine turns ever see these in their
+// schema. All three are special-cased in loop.ts's `runPromptLoop` (before
+// the generic `spec.run(...)` dispatch), same pattern as
+// `set_verification_spec`/`declare_done` — `run()` below is a defensive stub
+// that should never actually be invoked. See agent/src/phases.ts for the
+// PhaseState these mutate.
+export const PHASE_TOOLS: ToolSpec[] = [
+  {
+    name: "submit_intake",
+    kind: "read",
+    dangerous: false,
+    description:
+      "Classify the current request as ONE cheap step, before doing any real work: is it trivial (a one-line diff, no real ambiguity — e.g. \"fix this typo\", \"rename this variable\", \"add one guard clause\") or does it need real recon/planning? " +
+      "Call this exactly once, after at most a couple of quick read_file/list_dir/grep calls if you genuinely need them to decide — this is meant to be cheap, not a research phase. " +
+      "If trivial, you MUST also give `onelinePlan`: a single sentence describing exactly what you're about to do — this becomes your only task for the EXECUTE phase, which starts immediately (no separate recon/plan phase, no verification-spec requirement) once you call this. " +
+      "If not trivial, just give `reason` — the harness moves on to a proper recon/plan phase for you.",
+    input_schema: {
+      type: "object",
+      properties: {
+        trivial: { type: "boolean", description: "True for a one-line/no-ambiguity change; false for anything needing real recon or planning." },
+        reason: { type: "string", description: "Short justification for this classification." },
+        onelinePlan: { type: "string", description: "Required when trivial=true: the one-line implicit plan EXECUTE will carry out." },
+      },
+      required: ["trivial"],
+    },
+    async run() {
+      throw new Error("submit_intake must be handled by the loop's royal phase-machine branch, not executed generically");
+    },
+  },
+  {
+    name: "submit_plan",
+    kind: "read",
+    dangerous: false,
+    description:
+      "Submit the plan produced during the read-only recon/plan phase: a short rationale (`planDoc`, markdown) and a concrete task list EXECUTE will carry out one at a time, in dependency order. " +
+      "You MUST call set_verification_spec BEFORE this (this call is refused otherwise) — the plan and what \"done\" means are established together, not the plan first and verification as an afterthought. " +
+      "Each task needs a stable `id`, a short `title`, the `files` it's expected to touch, any `dependsOn` task ids that must complete first, and `doneWhen` — a concrete, checkable description of completion. Keep the list focused: independent, right-sized units of work, not a blow-by-blow of every file operation.",
+    input_schema: {
+      type: "object",
+      properties: {
+        planDoc: { type: "string", description: "Markdown rationale for the plan: what you found in recon, the approach, risks." },
+        tasks: {
+          type: "array",
+          minItems: 1,
+          maxItems: 12,
+          description: "1-12 tasks EXECUTE will implement in order (respecting dependsOn).",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string", description: "Short stable id for this task, e.g. \"t1\"." },
+              title: { type: "string", description: "Short human-readable title." },
+              files: { type: "array", items: { type: "string" }, description: "Files this task is expected to touch." },
+              dependsOn: { type: "array", items: { type: "string" }, description: "Task ids that must complete before this one starts." },
+              doneWhen: { type: "string", description: "Concrete, checkable description of what completion looks like for this task." },
+            },
+            required: ["id", "title", "doneWhen"],
+          },
+        },
+      },
+      required: ["planDoc", "tasks"],
+    },
+    async run() {
+      throw new Error("submit_plan must be handled by the loop's royal phase-machine branch, not executed generically");
+    },
+  },
+  {
+    name: "complete_task",
+    kind: "execute",
+    dangerous: false,
+    description:
+      "Mark ONE task from the current plan's task list as done, once you've implemented it (and run a quick relevant check if cheap — typecheck/lint/a focused test). " +
+      "The harness moves on to the next task in the list after this; call it once per task, not once for the whole plan. " +
+      "If you genuinely cannot complete a task, still call this with a `summary` explaining what's blocking it — the harness treats an unconfirmed task as not done and that will surface in verification, but silently moving on without calling this at all leaves the task list stuck.",
+    input_schema: {
+      type: "object",
+      properties: {
+        taskId: { type: "string", description: "The id of the task (from the plan's task list) you just completed." },
+        summary: { type: "string", description: "Optional short note on what you did (or what's blocking it)." },
+      },
+      required: ["taskId"],
+    },
+    async run() {
+      throw new Error("complete_task must be handled by the loop's royal phase-machine branch, not executed generically");
+    },
+  },
+];
+
+// `toolByName` must resolve BOTH arrays: loop.ts's dispatch loop looks up
+// `toolByName.get(tc.name)` for every tool call (including the three
+// special-cased phase tools above) before deciding how to execute it — an
+// unresolved name there is treated as "Unknown tool" and refused outright,
+// so PHASE_TOOLS must be present here even though they're deliberately
+// excluded from `TOOLS` itself (see PHASE_TOOLS's own doc comment above).
+export const toolByName = new Map([...TOOLS, ...PHASE_TOOLS].map((t) => [t.name, t]));

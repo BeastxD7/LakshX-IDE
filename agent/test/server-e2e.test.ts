@@ -335,8 +335,19 @@ test("lakshx agent e2e over ACP against a scripted provider", { timeout: 120_000
 
             await t3.test("royal mode: force-push is NOT blocked — the inverse of the auto-mode floor test", async () => {
               const permsBefore = permissionRequests.length;
+              // Royal Mode 2.0 Stage B: a top-level royal turn now runs the
+              // phase machine (INTAKE -> EXECUTE -> VERIFY), not a single
+              // flat tool call — script the minimal trivial-short-circuit
+              // round trip (submit_intake -> the real bash call this test is
+              // about -> complete_task). The floor-bypass mechanism this
+              // test asserts on is unconditional per-tool-call behavior
+              // (loop.ts's generic dispatch branch), unaffected by which
+              // phase-turn invoked the bash call.
               fake.enqueue(
+                toolTurn("call_intake_fp", "submit_intake", { trivial: true, reason: "one-line command", onelinePlan: "force push my branch" }),
+                textTurn("Classified as trivial."),
                 toolTurn("call_royal_fp", "bash", { command: "git push --force origin main" }),
+                toolTurn("call_complete_fp", "complete_task", { taskId: "t1" }),
                 textTurn("Pushed (or tried to)."),
               );
               const { updates, response } = await runTurn(session, "force push my branch");
@@ -360,8 +371,19 @@ test("lakshx agent e2e over ACP against a scripted provider", { timeout: 120_000
             await t3.test("royal mode: checkpoints workspace state BEFORE a mutating tool call runs", async () => {
               await writeFile(join(workspace, "seed.txt"), "seed-content");
 
+              // Royal Mode 2.0 Stage B: same trivial-short-circuit script as
+              // the force-push test above. The phase machine takes its OWN
+              // baseline checkpoint before EXECUTE starts (harmless extra
+              // shadow-git commit, identical tree) — the assertion below
+              // still holds because write_file's OWN before-mutation
+              // checkpoint (fired regardless of phase) is what ends up as
+              // shadow HEAD, and that commit is taken immediately before
+              // write_file runs either way.
               fake.enqueue(
+                toolTurn("call_intake_cpbm", "submit_intake", { trivial: true, reason: "one-line change", onelinePlan: "create new.txt" }),
+                textTurn("Classified as trivial."),
                 toolTurn("call_royal_wf", "write_file", { path: "new.txt", content: "hello-royal" }),
+                toolTurn("call_complete_cpbm", "complete_task", { taskId: "t1" }),
                 textTurn("Wrote it."),
               );
               const { response } = await runTurn(session, "create new.txt");

@@ -427,6 +427,12 @@ const agentApp = acp
           onSubagentsStart: (info) => void ctx.client.notify("lakshx/subagents_start", { sessionId, ...info }),
           onSubagentActivity: (info) => void ctx.client.notify("lakshx/subagent_activity", { sessionId, ...info }),
           onSubagentsEnd: (info) => void ctx.client.notify("lakshx/subagents_end", { sessionId, ...info }),
+          // Royal Mode 2.0 Stage B — the phase machine's live plan/phase
+          // surface: fired on every phase transition and task-status change
+          // (loop.ts's `runRoyalPhaseTurn`), same pure-relay pattern as the
+          // subagent notifications just above. Only ever fires for a
+          // top-level royal turn.
+          onPhaseState: (info) => void ctx.client.notify("lakshx/phase_state", { sessionId, ...info }),
         },
         promptId,
         abort.signal,

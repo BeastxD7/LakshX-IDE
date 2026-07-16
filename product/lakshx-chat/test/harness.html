@@ -91,7 +91,7 @@
   // full replay — exactly what extension.js's applyRewind does. "task*" is
   // included so the running-agents tray survives a simulated reload the same
   // way extension.js's real REPLAYABLE set does (see extension.js).
-  const REPLAYABLE = new Set(["user", "chunk", "system", "turnEnd", "checkpoint", "rewindAccepted", "modeChanged", "taskStart", "taskActivity", "taskDone", "taskSteered"]);
+  const REPLAYABLE = new Set(["user", "chunk", "system", "turnEnd", "checkpoint", "rewindAccepted", "modeChanged", "taskStart", "taskActivity", "taskDone", "taskSteered", "phaseState"]);
   const transcript = [];
   const post = (msg) => { if (REPLAYABLE.has(msg.type)) transcript.push(msg); reply(msg); };
   let promptSeq = 0;
@@ -144,6 +144,54 @@
     return taskId;
   }
 
+  /**
+   * Royal Mode 2.0 Stage B phase-machine demo, triggered by typing
+   * "/phasedemo" into the composer — feeds a realistic `phaseState`
+   * sequence (intake -> recon -> plan -> execute x2 tasks -> verify(fail)
+   * -> fix -> verify(pass) -> done) at readable intervals, so the phase
+   * card's task-list dots (pending/running/done) and the pass/fail
+   * verification banner can all be eyeballed without a real agent process.
+   */
+  function runPhaseDemo() {
+    const tasks = [
+      { id: "t1", title: "Add input validation to the signup form", files: ["signup.ts"], dependsOn: [], doneWhen: "invalid input is rejected with a clear error", status: "pending" },
+      { id: "t2", title: "Add a regression test for the validation", files: ["signup.test.ts"], dependsOn: ["t1"], doneWhen: "the new test passes", status: "pending" },
+    ];
+    const emit = (phase, patch, extra) => {
+      // Mutate the SHARED `tasks` array (not a fresh clone of the pristine
+      // original) so a status set by an earlier emit() (e.g. t1 -> "done")
+      // survives into later ones — otherwise every call would re-derive its
+      // task list from the all-"pending" original and later phases (verify/
+      // fix/done) would wrongly show every task as still pending.
+      if (patch) Object.assign(tasks.find((t) => t.id === patch.id), patch);
+      const list = tasks.map((t) => ({ ...t }));
+      post({ type: "phaseState", phase, taskList: list, currentTaskId: patch?.status === "in_progress" ? patch.id : undefined, fixRound: extra?.fixRound ?? 0, planReentries: 0, verificationResult: extra?.verificationResult, note: extra?.note });
+    };
+    // Deliberately generous spacing (~1.5-2s between steps, ~10s total) — this
+    // is a manually-eyeballed visual demo, not a timing-sensitive test, so it
+    // favors an easy-to-follow pace over a snappy one.
+    setTimeout(() => emit("intake"), 0);
+    setTimeout(() => emit("recon"), 800);
+    setTimeout(() => emit("plan"), 1800);
+    setTimeout(() => emit("execute", { id: "t1", status: "in_progress" }), 2800);
+    setTimeout(() => emit("execute", { id: "t1", status: "done" }), 4000);
+    setTimeout(() => emit("execute", { id: "t2", status: "in_progress" }), 4600);
+    setTimeout(() => emit("execute", { id: "t2", status: "done" }), 5800);
+    setTimeout(
+      () => emit("verify", null, { verificationResult: { passed: false, results: [{ cmd: "npm run typecheck", passed: false, exitCode: 1, durationMs: 812 }] } }),
+      6400,
+    );
+    setTimeout(() => emit("fix", null, { fixRound: 1 }), 7400);
+    setTimeout(
+      () => emit("verify", null, { verificationResult: { passed: true, results: [{ cmd: "npm run typecheck", passed: true, exitCode: 0, durationMs: 790 }] } }),
+      8600,
+    );
+    setTimeout(
+      () => emit("done", null, { verificationResult: { passed: true, results: [{ cmd: "npm run typecheck", passed: true, exitCode: 0, durationMs: 790 }] } }),
+      9200,
+    );
+  }
+
   window.acquireVsCodeApi = () => ({
     getState() {}, setState() {},
     postMessage(m) {
@@ -180,6 +228,17 @@
             runBgDemo();
             setTimeout(() => {
               post({ type: "chunk", text: "(harness) launched a demo background task — watch the tray near the composer." });
+              post({ type: "turnEnd" });
+            }, 100);
+            break;
+          }
+          if (m.text.trim() === "phasedemo") {
+            const promptId = "pr_harness_" + (++promptSeq);
+            post({ type: "user", text: m.text, promptId });
+            reply({ type: "turnStart" });
+            runPhaseDemo();
+            setTimeout(() => {
+              post({ type: "chunk", text: "(harness) launched a royal-mode phase-machine demo — watch the phase card above the composer." });
               post({ type: "turnEnd" });
             }, 100);
             break;

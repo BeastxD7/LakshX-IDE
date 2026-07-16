@@ -77,7 +77,18 @@ test(
       // user flips the IDE mode selector between turns.
       session.mode = "royal";
 
-      fake.enqueue(textTurn("On it."));
+      // Royal Mode 2.0 Stage B: a top-level royal turn now runs the phase
+      // machine (INTAKE -> ... -> EXECUTE -> VERIFY), not a single flat
+      // model call — script a minimal trivial-short-circuit round trip
+      // (submit_intake -> complete_task) rather than one bare textTurn. This
+      // test only cares about the system prompt's mode declaration, which is
+      // unchanged by the phase machine (systemPrompt(cwd, mode) is untouched).
+      fake.enqueue(
+        toolTurn("call_intake_royal", "submit_intake", { trivial: true, reason: "one-line change", onelinePlan: "ship the change" }),
+        textTurn("Classified as trivial."),
+        toolTurn("call_complete_royal", "complete_task", { taskId: "t1" }),
+        textTurn("On it."),
+      );
       await runPrompt(session, "now ship the change", cb, "pr_royal");
 
       const sys0 = systemOf(fake, 0);
@@ -184,9 +195,19 @@ test(
       };
       const cb = noopCallbacks();
 
-      // User switches to royal after the load, then prompts.
+      // User switches to royal after the load, then prompts. Royal Mode 2.0
+      // Stage B: a top-level royal turn runs the phase machine — script the
+      // minimal trivial-short-circuit round trip (see the earlier royal test
+      // in this file for why). The mode-switch reminder this test checks for
+      // is injected once, at the top of the FIRST runPromptLoop invocation
+      // (INTAKE) — request index 0 either way.
       session.mode = "royal";
-      fake.enqueue(textTurn("On it."));
+      fake.enqueue(
+        toolTurn("call_intake_load", "submit_intake", { trivial: true, reason: "one-line change", onelinePlan: "go" }),
+        textTurn("Classified as trivial."),
+        toolTurn("call_complete_load", "complete_task", { taskId: "t1" }),
+        textTurn("On it."),
+      );
       await runPrompt(session, "go", cb, "pr_after_load");
 
       const users = fake.requests[0].messages.filter((m: any) => m.role === "user");

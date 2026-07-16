@@ -6,11 +6,34 @@
  */
 import { randomUUID } from "node:crypto";
 import { logRoyalAudit, summarizeInput, summarizeText } from "./audit.js";
-import { checkpointBaseline, checkpointBeforeMutation, commitAfterTool, filesChangedSinceCommit } from "./checkpoint.js";
+import { checkpointBaseline, checkpointBeforeMutation, commitAfterTool, filesChangedSinceCommit, undoPaths } from "./checkpoint.js";
 import { envBlock, loadRules, scrubSecrets } from "./context.js";
 import { loadConfig, resolveModel } from "./config.js";
 import { validateDbQueryInput } from "./db.js";
 import { floorCheck, royalTamperCheck } from "./floor.js";
+import {
+  executeDirective,
+  fixDirective,
+  initialPhaseState,
+  intakeDirective,
+  MAX_FIX_ROUNDS,
+  MAX_PLAN_REENTRIES,
+  nextPendingTask,
+  type PhaseName,
+  parseCompleteTaskInput,
+  parseSubmitIntakeInput,
+  parseSubmitPlanInput,
+  reconPlanDirective,
+  rewindNote,
+  snapshotPhaseState,
+  successReport,
+  taskListForTrivialIntake,
+  terminalFailureReport,
+  verifyOutcomeForNoSpec,
+  type PhaseState,
+  type PhaseStateSnapshot,
+  type PhaseVerificationResult,
+} from "./phases.js";
 import { AnthropicAdapter } from "./providers/anthropic.js";
 import { OpenAICompatAdapter } from "./providers/openai-compat.js";
 import type { ChatAdapter, ChatMessage, ContentBlock, ToolResultPart } from "./providers/types.js";
@@ -164,6 +187,15 @@ export interface LoopCallbacks {
    * back to the orchestrating model.
    */
   onSubagentsEnd?(info: { batchId: string; results: { id: string; output: string; isError: boolean }[] }): void;
+  /**
+   * Royal Mode 2.0 Stage B — fired on every phase transition and task-status
+   * change (`lakshx/phase_state` in server.ts), so a client can render a live
+   * phase/checklist card the same way `onSubagentsStart`/`onCheckpoint` drive
+   * their own cards. Only ever fires for a top-level royal turn (see
+   * `runRoyalPhaseTurn`) — every other mode, and any subagent/background
+   * child even one inheriting royal mode, never calls this.
+   */
+  onPhaseState?(info: PhaseStateSnapshot): void;
 }
 
 export interface AgentSession {
@@ -196,6 +228,18 @@ export interface AgentSession {
    * refuse to confirm completion in that state rather than fabricate a pass.
    */
   verificationSpec?: VerificationSpec;
+  /**
+   * Royal Mode 2.0 Stage B — the phase-machine's live state for the CURRENT
+   * top-level royal turn (`runRoyalPhaseTurn` below). `undefined` for every
+   * other mode, always, and reset fresh (`initialPhaseState()`) at the start
+   * of each new top-level royal `runPrompt` call — it does not carry over
+   * between prompts (mirroring `tasks.ts`'s "no cross-restart persistence"
+   * scope cut, here scoped to "no cross-prompt persistence" instead: each
+   * user request gets its own full INTAKE..DONE cycle). Never set for a
+   * subagent/background child (depth > 0), even one inheriting royal mode —
+   * see `runPrompt`'s `depth === 0` gate.
+   */
+  phase?: PhaseState;
 }
 
 const MAX_ITERATIONS = 60;
@@ -319,6 +363,9 @@ export function toolTitle(name: string, input: any): string {
     case "resolve_merge_conflict": return `Resolve merge conflict: ${input.filePath}`;
     case "set_verification_spec": return "Set verification spec";
     case "declare_done": return `Declare done${input.summary ? `: ${String(input.summary).slice(0, 60)}` : ""}`;
+    case "submit_intake": return "Classify request (INTAKE)";
+    case "submit_plan": return "Submit plan";
+    case "complete_task": return `Complete task${input.taskId ? `: ${input.taskId}` : ""}`;
     default: return name;
   }
 }
@@ -600,6 +647,27 @@ async function runSubtask(
 }
 
 /**
+ * Royal Mode 2.0 Stage B: true while the CURRENT top-level royal turn is in
+ * one of the phase machine's read-only phases (INTAKE/RECON/PLAN). This is
+ * what makes "RECON is read-only" (doc 12) actually hold for
+ * `dispatch_subtasks` fan-out, not just for the parent's OWN direct tool
+ * calls: without this check, a child spawned via `dispatch_subtasks` during
+ * RECON would default to inheriting the PARENT's real `session.mode`
+ * (royal — full write access, no floor) the instant the model omitted an
+ * explicit per-task `mode`, silently defeating the phase's read-only
+ * guarantee through a tool that IS offered there (`dispatch_subtasks` is
+ * `dangerous: false`, included in every phase's read-only tool set).
+ * `session.phase` is `undefined` for every non-royal mode and for any
+ * subagent/background child (depth > 0 never sets it — see AgentSession's
+ * doc comment), so this is a no-op false everywhere except inside a
+ * top-level royal INTAKE/RECON/PLAN turn.
+ */
+function isReadOnlyPhaseTurn(session: AgentSession): boolean {
+  const p = session.phase?.phase;
+  return p === "intake" || p === "recon" || p === "plan";
+}
+
+/**
  * `dispatch_subtasks` tool handler (Part 1). Fans out `tasks` as concurrent
  * child `runPrompt()` loops via `Promise.all` — NOT a sequential loop, that
  * would defeat the entire point of this tool (tasks that depend on each
@@ -664,8 +732,13 @@ async function dispatchSubtasks(
   // this is what makes it safe to offer `dispatch_subtasks` in review mode
   // at all (see the caller's comment). Outside review mode, a task's `mode`
   // is a genuine per-task override, defaulting to the parent's own mode.
+  // SAME containment during a royal INTAKE/RECON/PLAN phase turn
+  // (`isReadOnlyPhaseTurn`) — those phases' whole guarantee is "read-only,"
+  // and a child inheriting the parent's real royal mode would silently
+  // defeat that, exactly the risk the review-mode check next to this
+  // already exists to close.
   const resolveChildMode = (task: SubtaskInput): AgentMode =>
-    session.mode === "review" ? "review" : (task.mode ?? session.mode);
+    session.mode === "review" || isReadOnlyPhaseTurn(session) ? "review" : (task.mode ?? session.mode);
 
   const batchId = randomUUID();
   cb.onSubagentsStart?.({
@@ -716,8 +789,12 @@ function lastAssistantText(session: AgentSession): string {
 function resolveBackgroundChildMode(
   parentMode: AgentMode,
   requested: AgentMode | undefined,
+  readOnlyPhaseTurn = false,
 ): { mode: AgentMode } | { reject: true } {
-  if (parentMode === "review") return { mode: "review" };
+  // Same read-only-phase containment as `resolveChildMode` above (blocking
+  // dispatch) — a background child spawned during a royal INTAKE/RECON/PLAN
+  // turn must not inherit real royal access either, for the identical reason.
+  if (parentMode === "review" || readOnlyPhaseTurn) return { mode: "review" };
   const want = requested ?? parentMode;
   if (want === "approve") return { reject: true };
   if (want === "royal" && parentMode !== "royal") return { mode: "auto" };
@@ -737,9 +814,11 @@ function dispatchBackgroundSubtasks(
   depth: number,
   acpSessionId: string,
 ): { content: string; isError: boolean } {
+  const readOnlyPhaseTurn = isReadOnlyPhaseTurn(session);
+
   // Reject the WHOLE call if any task requests approve mode (deadlock class).
   for (const t of tasks) {
-    if ("reject" in resolveBackgroundChildMode(session.mode, t.mode)) {
+    if ("reject" in resolveBackgroundChildMode(session.mode, t.mode, readOnlyPhaseTurn)) {
       return {
         isError: true,
         content: `Background subtasks cannot run in approve mode (task "${t.id}"): a permission prompt would block with no one to answer it, deadlocking wait_for_tasks. Use auto (pre-approved) for background work, or run this in the foreground (background:false).`,
@@ -767,7 +846,7 @@ function dispatchBackgroundSubtasks(
   const batchId = randomUUID();
   const launched: { taskId: string; prompt: string; mode: AgentMode }[] = [];
   for (const t of toLaunch) {
-    const childMode = (resolveBackgroundChildMode(session.mode, t.mode) as { mode: AgentMode }).mode;
+    const childMode = (resolveBackgroundChildMode(session.mode, t.mode, readOnlyPhaseTurn) as { mode: AgentMode }).mode;
     const childSession: AgentSession = { cwd: session.cwd, model: session.model, mode: childMode, history: [] };
     const abort = new AbortController();
     const task = backgroundTasks.add({
@@ -946,6 +1025,291 @@ async function runBackgroundTool(
   return { isError: false, content: header + summarizeFinalReports(selected) };
 }
 
+/**
+ * Royal Mode 2.0 Stage B — the phase-machine orchestrator that WRAPS
+ * `runPromptLoop` for a top-level (depth 0) royal-mode turn, per
+ * docs/research/12's design:
+ * INTAKE -> RECON -> PLAN -> EXECUTE -> VERIFY -> { done | FIX -> VERIFY | REWIND -> PLAN }.
+ * Every other mode, and any royal subagent/background child spawned via
+ * dispatch_subtasks (depth > 0 — see `runPrompt`'s branch below), never
+ * reaches this function at all and keeps calling `runPromptLoop` directly,
+ * unchanged — deliberately: recursively phase-managing a focused subagent
+ * task would be exactly the over-orchestration doc 12's "Pitfalls" section
+ * warns against, not a benefit.
+ *
+ * Each phase is ONE `runPromptLoop` invocation over the SAME `session`
+ * (EXECUTE is one invocation PER task) — never a duplicated tool-dispatch
+ * loop; this function only decides which directive/tool-set to hand the next
+ * invocation and reads `session.phase.phase` afterward to see what the
+ * model decided (via the three special-cased transition tools above). VERIFY
+ * is harness-only, no tool call: `runVerification` (verify.ts) runs directly
+ * against the frozen spec, exactly as doc 12 §12.3 describes ("you may call
+ * runVerification directly... since this is harness-orchestrated, not
+ * model-invoked").
+ *
+ * Termination proof: the outer loop runs at most `MAX_PLAN_REENTRIES + 1`
+ * times (the original attempt plus up to 2 rewind-triggered re-plans); each
+ * attempt's EXECUTE is bounded by its (capped-at-12) task list, and each
+ * attempt's FIX sub-loop is capped at `MAX_FIX_ROUNDS`. Every bound is a
+ * plain counter compared against a constant — no path here can loop forever.
+ */
+async function runRoyalPhaseTurn(
+  session: AgentSession,
+  userText: string,
+  cb: LoopCallbacks,
+  promptId: string,
+  trace: PromptTrace,
+  model: string,
+  adapter: ChatAdapter,
+  signal: AbortSignal | undefined,
+  depth: number,
+  acpSessionId: string | undefined,
+): Promise<"end_turn" | "max_turn_requests" | "cancelled"> {
+  session.phase = initialPhaseState();
+  cb.onPhaseState?.(snapshotPhaseState(session.phase));
+
+  // Read-only tool set for INTAKE/RECON/PLAN — the SAME expression review
+  // mode's own tool filtering already uses (`allowedTools` in `runPrompt`
+  // below), plus excluding `declare_done` too: VERIFY is harness-orchestrated
+  // in this design (see this function's doc comment), never model-invoked
+  // mid-phase, so the model must not even see that tool from a phase turn.
+  const readonlyTools = TOOLS.filter((t) => !t.dangerous && t.name !== "declare_done");
+  const submitIntakeTool = toolByName.get("submit_intake")!;
+  const submitPlanTool = toolByName.get("submit_plan")!;
+  const completeTaskTool = toolByName.get("complete_task")!;
+
+  /**
+   * Full (mutating) tool set for EXECUTE/FIX — always minus declare_done,
+   * and minus set_verification_spec once `excludeSpecTool` (a spec already
+   * exists): exposing set_verification_spec after the spec is frozen would
+   * let the model quietly re-define "done" mid-implementation, undermining
+   * the exact non-weakening guarantee Stage A's freeze/hash exists for —
+   * enforced here at the schema level (the tool literally isn't offered),
+   * the same "can't skip/weaken because it's not in the schema" mechanism
+   * doc 12 specifies for every other phase transition.
+   */
+  const mutatingTools = (excludeSpecTool: boolean): ToolSpec[] =>
+    TOOLS.filter((t) => t.name !== "declare_done" && !(excludeSpecTool && t.name === "set_verification_spec"));
+
+  const runReconPlan = (): Promise<"end_turn" | "max_turn_requests" | "cancelled"> => {
+    session.phase!.phase = "recon";
+    cb.onPhaseState?.(snapshotPhaseState(session.phase!));
+    return runPromptLoop(
+      session,
+      reconPlanDirective(userText, session.phase!.failureHistory),
+      cb,
+      promptId,
+      trace,
+      model,
+      adapter,
+      [...readonlyTools, submitPlanTool],
+      signal,
+      depth,
+      acpSessionId,
+    );
+  };
+
+  /** Reuses checkpoint.ts's existing per-prompt baseline mechanism (doc 11 §2.3) as a per-phase baseline: taken once, right before EXECUTE's first task starts, from whichever path got there (INTAKE-trivial or PLAN) — this doubles as the REWIND target and the "files changed" diff base for the final report. */
+  const takePlanBaseline = async (): Promise<void> => {
+    const bl = await checkpointBaseline(session.cwd, promptId);
+    session.phase!.planBaselineSha = bl.sha;
+    cb.onBaseline?.(bl.sha);
+  };
+
+  /** Stream the phase machine's own final report exactly like real model text (`cb.onText`), then record it in history so persistence/replay/rewind see a normal assistant message — never silently ending the turn with no visible explanation. */
+  const finishWithReport = (text: string): void => {
+    cb.onText(text);
+    session.history.push({ role: "assistant", content: [{ type: "text", text }] });
+    cb.onHistoryChanged?.();
+  };
+
+  // ---- INTAKE ----
+  let stop = await runPromptLoop(
+    session,
+    intakeDirective(userText),
+    cb,
+    promptId,
+    trace,
+    model,
+    adapter,
+    [...readonlyTools, submitIntakeTool],
+    signal,
+    depth,
+    acpSessionId,
+  );
+  if (stop !== "end_turn") return stop;
+
+  if (session.phase.phase === "intake") {
+    // The model never called submit_intake — default to the safer, more
+    // thorough path (doc 12's INTAKE short-circuit is an OPTIMIZATION for
+    // clearly-trivial requests, never the only way to make progress).
+    session.phase.failureHistory.push("INTAKE ended without classifying the request — defaulted to RECON/PLAN.");
+    session.phase.phase = "recon";
+  }
+
+  // ---- RECON + PLAN (skipped entirely by the INTAKE-trivial short-circuit) ----
+  if (session.phase.phase === "recon") {
+    stop = await runReconPlan();
+    if (stop !== "end_turn") return stop;
+    // `submit_plan`'s handler (runPromptLoop) may have run during that call
+    // and reassigned `session.phase.phase` — re-read through a fresh local
+    // (typed as the full union) rather than compare the narrowed-to-"recon"
+    // property access directly, which `tsc` otherwise (correctly, but
+    // unhelpfully here) flags as an always-false comparison.
+    const phaseAfterPlan = session.phase.phase as PhaseName;
+    if (phaseAfterPlan !== "plan") {
+      session.phase.phase = "done";
+      finishWithReport(
+        "Could not produce a plan: the recon/plan phase ended without calling submit_plan. No changes were made.",
+      );
+      cb.onPhaseState?.(snapshotPhaseState(session.phase));
+      return "end_turn";
+    }
+  }
+
+  session.phase.phase = "execute";
+  await takePlanBaseline();
+  cb.onPhaseState?.(snapshotPhaseState(session.phase));
+
+  // ---- EXECUTE (sequential, main thread) / VERIFY / FIX / REWIND ----
+  for (;;) {
+    // EXECUTE: sequential task loop, dependency-ordered (`nextPendingTask`).
+    // Parallel implementer subagents for provably-disjoint task file sets
+    // are explicitly deferred (doc 12 — worktree isolation for concurrent
+    // writers is a separate, harder problem) — this is a complete,
+    // real, sequential v1, not a stub.
+    for (;;) {
+      const task = nextPendingTask(session.phase);
+      if (!task) break;
+      task.status = "in_progress";
+      session.phase.currentTaskId = task.id;
+      cb.onPhaseState?.(snapshotPhaseState(session.phase));
+      const needsSpec = !session.verificationSpec;
+      stop = await runPromptLoop(
+        session,
+        executeDirective(task, needsSpec),
+        cb,
+        promptId,
+        trace,
+        model,
+        adapter,
+        [...mutatingTools(!needsSpec), completeTaskTool],
+        signal,
+        depth,
+        acpSessionId,
+      );
+      if (stop !== "end_turn") return stop;
+      if (task.status === "in_progress") {
+        task.status = "failed";
+        task.summary = "model did not call complete_task for this task";
+      }
+      cb.onPhaseState?.(snapshotPhaseState(session.phase));
+    }
+
+    const runVerify = async (): Promise<PhaseVerificationResult> => {
+      session.phase!.phase = "verify";
+      cb.onPhaseState?.(snapshotPhaseState(session.phase!));
+      const result: PhaseVerificationResult = session.verificationSpec
+        ? await runVerification(session.verificationSpec, session.cwd, signal)
+        : verifyOutcomeForNoSpec(session.phase!.viaTrivialIntake);
+      session.phase!.lastVerification = result;
+      cb.onPhaseState?.(snapshotPhaseState(session.phase!));
+      return result;
+    };
+
+    let verification = await runVerify();
+    // FIX: up to MAX_FIX_ROUNDS implement-then-verify rounds against the
+    // SAME failure set — the primary runaway-loop defense (doc 12 Pitfalls).
+    while (!verification.passed && session.phase.fixRound < MAX_FIX_ROUNDS) {
+      session.phase.fixRound++;
+      session.phase.phase = "fix";
+      cb.onPhaseState?.(snapshotPhaseState(session.phase));
+      stop = await runPromptLoop(
+        session,
+        fixDirective(session.phase.fixRound, verification),
+        cb,
+        promptId,
+        trace,
+        model,
+        adapter,
+        mutatingTools(true),
+        signal,
+        depth,
+        acpSessionId,
+      );
+      if (stop !== "end_turn") return stop;
+      verification = await runVerify();
+    }
+
+    if (verification.passed) {
+      session.phase.phase = "done";
+      const changed = session.phase.planBaselineSha ? await filesChangedSinceCommit(session.cwd, session.phase.planBaselineSha) : [];
+      finishWithReport(successReport(session.phase, changed));
+      cb.onPhaseState?.(snapshotPhaseState(session.phase));
+      return "end_turn";
+    }
+
+    // Still failing after MAX_FIX_ROUNDS — REWIND to the plan baseline.
+    // Deliberately reverts files FIRST, then checks the re-entry cap: even
+    // on the FINAL exhausted attempt, the workspace must end up back at a
+    // known-good (plan baseline) state rather than left holding whatever
+    // half-broken edit the last FIX round produced — `terminalFailureReport`
+    // below states plainly that files were reverted, and this ordering is
+    // what makes that statement actually true rather than true-except-the-
+    // last-time.
+    session.phase.phase = "rewind";
+    cb.onPhaseState?.(snapshotPhaseState(session.phase));
+    if (session.phase.planBaselineSha) {
+      // Baseline-vs-CURRENT-WORKING-TREE diff, not HEAD-to-HEAD: royal
+      // mode's own checkpointBeforeMutation deliberately leaves shadow HEAD
+      // one mutation BEHIND the working tree (see filesChangedSinceCommit's
+      // doc comment, checkpoint.ts), so a HEAD-to-HEAD diff would silently
+      // miss the LAST mutation EXECUTE/FIX made — filesChangedSinceCommit
+      // reads baseline-vs-working-tree instead, which includes it.
+      // `force: true`: this is the harness's own autonomous rewind decision
+      // (mirroring declare_done's harness-run verification), not a
+      // user-gated undo — a manual-edit conflict check is the wrong gate
+      // for an action the human never has to approve in royal mode.
+      const toRevert = await filesChangedSinceCommit(session.cwd, session.phase.planBaselineSha);
+      if (toRevert.length) await undoPaths(session.cwd, toRevert, session.phase.planBaselineSha, true);
+    }
+    session.phase.failureHistory.push(rewindNote(MAX_FIX_ROUNDS, verification));
+
+    // Cap total re-entries so this provably terminates rather than looping
+    // forever (doc 12 Pitfalls' runaway-verify-fix-loop defense, part 2).
+    session.phase.planReentries++;
+    if (session.phase.planReentries > MAX_PLAN_REENTRIES) {
+      session.phase.phase = "done";
+      finishWithReport(terminalFailureReport(session.phase));
+      cb.onPhaseState?.(snapshotPhaseState(session.phase));
+      return "end_turn";
+    }
+
+    session.phase.fixRound = 0;
+    session.phase.taskList = [];
+    session.phase.currentTaskId = undefined;
+    session.phase.viaTrivialIntake = false; // a rewind always re-enters via a real PLAN, never the trivial short-circuit again
+    session.verificationSpec = undefined; // stale spec may itself be part of what went wrong — the revised plan re-establishes it
+    cb.onPhaseState?.(snapshotPhaseState(session.phase));
+
+    stop = await runReconPlan();
+    if (stop !== "end_turn") return stop;
+    const phaseAfterReplan = session.phase.phase as PhaseName;
+    if (phaseAfterReplan !== "plan") {
+      session.phase.phase = "done";
+      finishWithReport(
+        `Reverted to the plan baseline, but the re-plan attempt ended without calling submit_plan.\n\n${terminalFailureReport(session.phase)}`,
+      );
+      cb.onPhaseState?.(snapshotPhaseState(session.phase));
+      return "end_turn";
+    }
+    session.phase.phase = "execute";
+    await takePlanBaseline();
+    cb.onPhaseState?.(snapshotPhaseState(session.phase));
+    // loop back to the outer `for (;;)` — EXECUTE the revised task list
+  }
+}
+
 export async function runPrompt(
   session: AgentSession,
   userText: string,
@@ -1001,6 +1365,22 @@ export async function runPrompt(
   });
 
   try {
+    // Royal Mode 2.0 Stage B: the phase machine wraps `runPromptLoop` for a
+    // TOP-LEVEL (depth 0) royal turn only. `depth === 0` is load-bearing,
+    // not incidental — a subagent (dispatch_subtasks) or background child
+    // that inherits royal mode (depth > 0) still calls `runPromptLoop`
+    // directly on the `else` branch below, exactly as before this Stage:
+    // recursively phase-managing a focused subagent task would be the
+    // over-orchestration doc 12's "Pitfalls" section warns against, and
+    // `session.phase` is never set for one (see AgentSession's doc comment).
+    // Every OTHER mode (review/approve/auto) always takes the `else` branch
+    // too, unconditionally — this file's only other change to their path is
+    // the three new tool names existing in `toolByName` (tools.ts) for
+    // dispatch lookups, which never appear in their `allowedTools` above, so
+    // their system prompt, tool schema, and dispatch behavior are unchanged.
+    if (session.mode === "royal" && depth === 0) {
+      return await runRoyalPhaseTurn(session, userText, cb, promptId, trace, model, adapter, signal, depth, sessionId);
+    }
     return await runPromptLoop(session, userText, cb, promptId, trace, model, adapter, allowedTools, signal, depth, sessionId);
   } finally {
     trace.end();
@@ -1305,6 +1685,101 @@ async function runPromptLoop(
                 `Verification FAILED: ${failCount}/${result.results.length} check(s) failing — you are not done, ` +
                 `fix the failures and try again.\n${lines.join("\n")}`;
               isErr = true;
+            }
+          }
+        }
+        cb.onToolEnd({ id: tc.id, output: out, isError: isErr });
+        results.push({ type: "tool_result", tool_use_id: tc.id, content: out, is_error: isErr });
+        continue;
+      }
+
+      // `submit_intake` / `submit_plan` / `complete_task` (Royal Mode 2.0
+      // Stage B — the phase machine's own transition tools). Special-cased
+      // for the identical structural reason as declare_done/
+      // set_verification_spec just above: each reads/writes session-scoped
+      // state (`session.phase`) rather than doing one generic unit of tool
+      // work. They are only ever OFFERED to the model inside a phase turn's
+      // `allowedTools` (`runRoyalPhaseTurn` below builds that list per
+      // phase) — the `!session.phase` branches here are a defensive
+      // backstop for a stray/malformed call, not the real gate.
+      if (tc.name === "submit_intake") {
+        cb.onToolStart({ id: tc.id, name: tc.name, input: tc.input, kind: spec.kind, title });
+        let out: string;
+        let isErr = false;
+        if (!session.phase) {
+          out = "submit_intake is only available during the royal-mode phase machine's INTAKE phase.";
+          isErr = true;
+        } else {
+          const parsed = parseSubmitIntakeInput(tc.input ?? {});
+          if (!parsed.ok) {
+            out = `Invalid submit_intake input: ${parsed.error}`;
+            isErr = true;
+          } else if (!parsed.trivial) {
+            session.phase.phase = "recon";
+            out = `Classified as non-trivial (${parsed.reason}) — proceeding to RECON + PLAN.`;
+            cb.onPhaseState?.(snapshotPhaseState(session.phase));
+          } else {
+            session.phase.phase = "execute";
+            session.phase.viaTrivialIntake = true;
+            session.phase.taskList = taskListForTrivialIntake(parsed.onelinePlan);
+            out = `Classified as trivial (${parsed.reason}) — skipping recon/plan, proceeding straight to EXECUTE with one task ("${parsed.onelinePlan}").`;
+            cb.onPhaseState?.(snapshotPhaseState(session.phase));
+          }
+        }
+        cb.onToolEnd({ id: tc.id, output: out, isError: isErr });
+        results.push({ type: "tool_result", tool_use_id: tc.id, content: out, is_error: isErr });
+        continue;
+      }
+
+      if (tc.name === "submit_plan") {
+        cb.onToolStart({ id: tc.id, name: tc.name, input: tc.input, kind: spec.kind, title });
+        let out: string;
+        let isErr = false;
+        if (!session.phase) {
+          out = "submit_plan is only available during the royal-mode phase machine's PLAN phase.";
+          isErr = true;
+        } else {
+          const parsed = parseSubmitPlanInput(tc.input ?? {}, !!session.verificationSpec);
+          if (!parsed.ok) {
+            out = `Invalid submit_plan input: ${parsed.error}`;
+            isErr = true;
+          } else {
+            session.phase.phase = "plan";
+            session.phase.planDoc = parsed.planDoc;
+            session.phase.taskList = parsed.tasks;
+            out =
+              `Plan accepted: ${parsed.tasks.length} task(s)${parsed.truncatedNote ? ` — ${parsed.truncatedNote}` : ""}. ` +
+              `Proceeding to EXECUTE.`;
+            cb.onPhaseState?.(snapshotPhaseState(session.phase));
+          }
+        }
+        cb.onToolEnd({ id: tc.id, output: out, isError: isErr });
+        results.push({ type: "tool_result", tool_use_id: tc.id, content: out, is_error: isErr });
+        continue;
+      }
+
+      if (tc.name === "complete_task") {
+        cb.onToolStart({ id: tc.id, name: tc.name, input: tc.input, kind: spec.kind, title });
+        let out: string;
+        let isErr = false;
+        if (!session.phase) {
+          out = "complete_task is only available during the royal-mode phase machine's EXECUTE phase.";
+          isErr = true;
+        } else {
+          const parsed = parseCompleteTaskInput(tc.input ?? {});
+          if (!parsed.ok) {
+            out = `Invalid complete_task input: ${parsed.error}`;
+            isErr = true;
+          } else {
+            const task = session.phase.taskList.find((t) => t.id === parsed.taskId);
+            if (!task) {
+              out = `No task "${parsed.taskId}" in the current plan's task list.`;
+              isErr = true;
+            } else {
+              task.status = "done";
+              task.summary = parsed.summary;
+              out = `Task ${parsed.taskId} marked done.`;
+              cb.onPhaseState?.(snapshotPhaseState(session.phase));
             }
           }
         }

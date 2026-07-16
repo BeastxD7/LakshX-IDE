@@ -276,8 +276,19 @@ test("royal mode: tool calls also fire lakshx/checkpoint (files-changed UI parit
 
             await writeFile(join(workspace, "royal-seed.txt"), "seed");
 
+            // Royal Mode 2.0 Stage B: a top-level royal turn now runs the
+            // phase machine (INTAKE -> EXECUTE -> VERIFY), not a single flat
+            // tool call — script the minimal trivial-short-circuit round
+            // trip (submit_intake -> the real write_file this test is about
+            // -> complete_task) rather than a bare write_file turn. The
+            // generic per-tool royal-checkpoint mechanism this test asserts
+            // on fires identically regardless of which phase-turn invoked
+            // write_file, so the assertions below are otherwise unchanged.
             fake.enqueue(
+              toolTurn("call_intake_cp", "submit_intake", { trivial: true, reason: "one-line change", onelinePlan: "create royal.txt" }),
+              textTurn("Classified as trivial."),
               toolTurn("call_royal_wf", "write_file", { path: "royal.txt", content: "hello-royal-checkpoint" }),
+              toolTurn("call_complete_cp", "complete_task", { taskId: "t1" }),
               textTurn("Wrote it."),
             );
             const before = checkpoints.length;
