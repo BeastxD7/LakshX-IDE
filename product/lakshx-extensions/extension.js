@@ -153,6 +153,17 @@ async function showCuratedPanel(context) {
   currentPanel.webview.html = panelHtml(context, currentPanel.webview);
   currentPanel.webview.onDidReceiveMessage(async (message) => {
     if (message.type === "install") {
+      // Defense-in-depth (security audit finding, 2026-07-17): only ever
+      // install an id that's actually in our own curated list, even though
+      // no forgery path into this webview exists today — the webview has no
+      // script-src outside its own bundle and every rendered field is
+      // escapeHtml()'d, so this is a belt-and-suspenders check, not a fix
+      // for a live exploit.
+      const known = curated.CURATED_EXTENSIONS.some((e) => e.id === message.id);
+      if (!known) {
+        vscode.window.showErrorMessage(`LakshX Extensions: refusing to install "${message.id}" — not in the curated list.`);
+        return;
+      }
       try {
         await vscode.commands.executeCommand("workbench.extensions.installExtension", message.id);
         vscode.window.showInformationMessage(`LakshX Extensions: installing ${message.id}…`);
