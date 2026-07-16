@@ -611,22 +611,51 @@ concurrent writers (still a shared working tree, same file-overlap caveat as §1
 prompt nobody can see would deadlock `wait_for_tasks`, so background children are restricted
 to `review`/`auto`, or `royal` only when inherited from an already-royal parent).
 
-### 12.3 Designed, not started: the Royal Mode 2.0 phase machine
+### 12.3 Shipped: the Royal Mode 2.0 phase machine
 
-The larger structural change in `docs/research/12` — turning a Royal-mode turn from "the flat
-loop with the floor off" into a harness-enforced state machine:
+The larger structural change in `docs/research/12` is merged: royal-mode turns are no longer
+"the flat loop with the floor off" — they run a real harness-enforced state machine
+(`agent/src/phases.ts` + the `runRoyalPhaseTurn` orchestrator in `loop.ts`):
 
 ```
 INTAKE → RECON → PLAN → [checkpoint] → EXECUTE → VERIFY → { done | FIX → VERIFY | REWIND → PLAN }
 ```
 
-with typed subagent roles (`explorer`, `implementer`, `verifier`, `critic` — an extension of
-today's single undifferentiated subagent), a `VerificationSpec` frozen at plan time that the
-model cannot loosen without an explicit, logged `amend_verification_spec` call, and a
-completion gate where `declare_done` re-runs verification **server-side** — so the model can
-propose that it's finished, but only the harness's own re-check can confirm it. None of this
-exists in code yet. It's listed here so the roadmap is visible in one place, not because
-there's an implementation to describe.
+Verified end-to-end: 5 dedicated tests in `agent/test/royal-phase-machine.test.ts` — a trivial
+request short-circuiting straight to EXECUTE, a full non-trivial run through every phase to a
+real passing verification, a REWIND proof that checks both file non-existence *and* a real
+`filesChangedSinceCommit` git diff (empty) against the first baseline — not a status-string
+assertion — and a regression test proving review/approve/auto sessions never set
+`session.phase` at all.
+
+Mechanics: gated to `session.mode === "royal" && depth === 0` — a subagent/background child
+that inherits royal mode still takes the flat loop, so recursively phase-managing a focused
+subtask (exactly the over-orchestration `docs/research/12` warns against) never happens.
+INTAKE classifies the request; trivial requests skip RECON/PLAN entirely. RECON+PLAN run as
+one read-only turn and PLAN cannot complete without a frozen `VerificationSpec` (Stage A,
+§12.2's sibling — `set_verification_spec` is mandatory on every non-trivial path, and the tool
+is removed from the schema the instant the spec freezes, so the model cannot quietly redefine
+"done" mid-implementation). EXECUTE is sequential and main-thread-only in this version —
+parallel implementer subagents and git-worktree isolation for concurrent writers are
+explicitly deferred, not built. VERIFY calls the verifier **directly, harness-side**, never
+through the model-invoked `declare_done` tool — the stricter of the two paths the design doc
+considered. FIX allows up to 2 retry rounds against the frozen spec; still failing triggers a
+real REWIND (checkpoint-based file revert) back to the PLAN baseline, capped at 2 re-entries
+(3 total attempts) — a plain counter, structurally incapable of looping forever.
+
+One real regression was found and fixed during the build: `dispatch_subtasks` calls fired
+during RECON without an explicit per-task `mode` were silently inheriting the parent's full
+royal write access — defeating RECON's read-only guarantee through a tool that's legitimately
+offered there. Fixed by gating both `resolveChildMode` and `resolveBackgroundChildMode` on the
+read-only-phase check, covered by its own regression test.
+
+Deferred, stated plainly rather than oversold: typed subagent roles (`explorer`/`implementer`/
+`verifier`/`critic` as distinct entities, vs. today's role-by-prompt-convention), an
+`amend_verification_spec` tamper-watch tool (today's enforcement is schema-level — the tool
+simply isn't offered post-freeze — not a logged-amendment UI), per-task micro-verification
+(left to the model's own `bash` calls rather than an independent harness-run check), and phase
+state surviving a session reload or agent-process restart (resets fresh each top-level royal
+prompt, consistent with `tasks.ts`'s existing no-cross-restart-persistence precedent).
 
 ---
 
