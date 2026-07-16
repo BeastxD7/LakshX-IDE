@@ -1,9 +1,38 @@
 /** Provider-neutral chat types. Anthropic-flavored: richest superset. */
 
+/**
+ * One part of a rich (multi-part) tool_result. The `image` variant is what
+ * makes screenshots MODEL-VISIBLE (Royal Mode 2.0 Stage 1a): loop.ts embeds
+ * a tool's screenshot here (vision-capable models only — see vision.ts)
+ * instead of the text-only string every tool result used to be. Each
+ * provider adapter maps it to its own wire shape (anthropic.ts: tool_result
+ * content array with a base64 image source block; openai-compat.ts: a
+ * data:-URI image_url in a follow-up user message) and degrades to an
+ * honest text placeholder when the model/provider path can't take images.
+ * `path` is the already-saved on-disk file — carried so persistence
+ * (store.ts) can drop the multi-MB base64 and keep a pointer instead.
+ */
+export type ToolResultPart =
+  | { type: "text"; text: string }
+  | { type: "image"; mimeType: string; base64: string; path?: string };
+
 export type ContentBlock =
   | { type: "text"; text: string }
   | { type: "tool_use"; id: string; name: string; input: unknown }
-  | { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean };
+  // `content` stays `string` for every plain tool result (and for all
+  // pre-existing persisted history — old session JSON loads unchanged);
+  // the `ToolResultPart[]` form is only ever built by loop.ts when a tool
+  // returned an image AND the current model is vision-capable.
+  | { type: "tool_result"; tool_use_id: string; content: string | ToolResultPart[]; is_error?: boolean };
+
+/** Flatten a tool_result's content to its text, whichever shape it is. */
+export function toolResultText(content: string | ToolResultPart[]): string {
+  if (typeof content === "string") return content;
+  return content
+    .filter((p): p is Extract<ToolResultPart, { type: "text" }> => p.type === "text")
+    .map((p) => p.text)
+    .join("\n");
+}
 
 export interface ChatMessage {
   role: "user" | "assistant";

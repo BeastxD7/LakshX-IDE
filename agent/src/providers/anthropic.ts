@@ -1,7 +1,8 @@
 /** Anthropic Messages API adapter — fetch + SSE, no SDK dependency. */
 import type { ProviderConfig } from "../config.js";
+import { IMAGE_UNSUPPORTED_PLACEHOLDER, isVisionCapableModel } from "../vision.js";
 import { sseLines } from "./types.js";
-import type { ChatAdapter, ChatMessage, TurnRequest, TurnResult } from "./types.js";
+import type { ChatAdapter, ChatMessage, ToolResultPart, TurnRequest, TurnResult } from "./types.js";
 
 export class AnthropicAdapter implements ChatAdapter {
   constructor(private cfg: ProviderConfig) {}
@@ -20,7 +21,7 @@ export class AnthropicAdapter implements ChatAdapter {
         model: req.model,
         max_tokens: req.maxTokens ?? 8192,
         system: req.system,
-        messages: req.messages.map(toWire),
+        messages: req.messages.map((m) => toWire(m, isVisionCapableModel(req.model))),
         tools: req.tools.map((t) => ({
           name: t.name,
           description: t.description,
@@ -88,14 +89,34 @@ export class AnthropicAdapter implements ChatAdapter {
   }
 }
 
-function toWire(m: ChatMessage) {
+/**
+ * Neutral message → Anthropic wire shape. Exported for direct unit testing
+ * (test/provider-image-wire.test.ts) — pure, no network.
+ *
+ * A tool_result whose content is a `ToolResultPart[]` (loop.ts's rich form,
+ * built when a tool returned a screenshot for a vision-capable model) maps
+ * to Anthropic's native tool_result content ARRAY: text parts as text
+ * blocks, image parts as base64 image source blocks — this is what makes
+ * the model actually SEE what it screenshotted. When `visionCapable` is
+ * false (model switched mid-session, or LAKSHX_VISION=0), image parts
+ * degrade to the shared honest text placeholder instead of risking a 4xx.
+ */
+export function toWire(m: ChatMessage, visionCapable: boolean) {
   return {
     role: m.role,
     content: m.content.map((b) => {
       if (b.type === "tool_result") {
-        return { type: "tool_result", tool_use_id: b.tool_use_id, content: b.content, is_error: b.is_error };
+        const content =
+          typeof b.content === "string" ? b.content : b.content.map((p) => toWireToolResultPart(p, visionCapable));
+        return { type: "tool_result", tool_use_id: b.tool_use_id, content, is_error: b.is_error };
       }
       return b;
     }),
   };
+}
+
+function toWireToolResultPart(p: ToolResultPart, visionCapable: boolean) {
+  if (p.type === "text") return { type: "text", text: p.text };
+  if (!visionCapable || !p.base64) return { type: "text", text: IMAGE_UNSUPPORTED_PLACEHOLDER };
+  return { type: "image", source: { type: "base64", media_type: p.mimeType, data: p.base64 } };
 }

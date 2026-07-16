@@ -11,6 +11,7 @@ import * as acp from "@agentclientprotocol/sdk";
 import { maybeCompact, readFileAtCommit, undoFile, undoPaths } from "./checkpoint.js";
 import { availableProviders, loadConfig } from "./config.js";
 import { runPrompt, toolTitle, type AgentMode, type AgentSession } from "./loop.js";
+import { toolResultText } from "./providers/types.js";
 import { probeProvider } from "./providers/validate.js";
 import { loadSessionFile, pruneSessions, saveSessionSoon, type PromptCheckpoint } from "./store.js";
 import { capToolImageBase64 } from "./tool-image-cap.js";
@@ -122,7 +123,10 @@ acp
             sessionUpdate: "tool_call_update",
             toolCallId: block.tool_use_id,
             status: block.is_error ? "failed" : "completed",
-            content: [{ type: "content", content: { type: "text", text: block.content.slice(0, 4000) } }],
+            // toolResultText: persisted history is always the flat string
+            // shape (store.ts scrubs rich image-bearing content down to a
+            // string on save), but tolerate the rich form defensively.
+            content: [{ type: "content", content: { type: "text", text: toolResultText(block.content).slice(0, 4000) } }],
           });
         }
       }

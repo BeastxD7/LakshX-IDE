@@ -8,7 +8,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { scrubSecrets } from "./context.js";
 import type { AgentMode } from "./loop.js";
-import type { ChatMessage } from "./providers/types.js";
+import type { ChatMessage, ToolResultPart } from "./providers/types.js";
 
 /**
  * One prompt's checkpoint record (docs/research/11-prompt-checkpoints-undo.md
@@ -48,13 +48,37 @@ function sessionPath(id: string): string {
   return join(sessionsDir(), `${id}.json`);
 }
 
+/**
+ * Flatten a tool_result's content to a scrubbed plain STRING for disk.
+ *
+ * A rich `ToolResultPart[]` content (loop.ts's vision embedding — see
+ * providers/types.ts) can carry a screenshot's multi-MB base64; persisting
+ * that would balloon every session JSON and every debounced re-write. So on
+ * save: text parts are scrubbed and kept, image parts are DROPPED and
+ * replaced with a small marker naming the already-on-disk PNG path. The
+ * persisted format therefore stays the pre-existing string shape (no schema
+ * bump, old readers unaffected). Consequence, accepted deliberately: after
+ * a session/load the model won't re-see old screenshots — it can always
+ * re-run browser_act {action:"screenshot"} for fresh eyes.
+ */
+function scrubToolResultContent(content: string | ToolResultPart[]): string {
+  if (typeof content === "string") return scrubSecrets(content);
+  return content
+    .map((p) =>
+      p.type === "text"
+        ? scrubSecrets(p.text)
+        : `[screenshot omitted from saved session${p.path ? `: ${scrubSecrets(p.path)}` : ""}]`,
+    )
+    .join("\n");
+}
+
 /** Deep-scrub any secret-shaped strings out of a history array before it hits disk. */
 function scrubHistory(history: ChatMessage[]): ChatMessage[] {
   return history.map((m) => ({
     ...m,
     content: m.content.map((b) => {
       if (b.type === "text") return { ...b, text: scrubSecrets(b.text) };
-      if (b.type === "tool_result") return { ...b, content: scrubSecrets(b.content) };
+      if (b.type === "tool_result") return { ...b, content: scrubToolResultContent(b.content) };
       if (b.type === "tool_use") return { ...b, input: JSON.parse(scrubSecrets(JSON.stringify(b.input ?? {}))) };
       return b;
     }),

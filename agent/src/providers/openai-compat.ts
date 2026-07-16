@@ -4,8 +4,9 @@
  * Cerebras, Ollama, LM Studio, any /v1/chat/completions server.
  */
 import type { ProviderConfig } from "../config.js";
-import { sseLines } from "./types.js";
-import type { ChatAdapter, ChatMessage, TurnRequest, TurnResult } from "./types.js";
+import { IMAGE_UNSUPPORTED_PLACEHOLDER, isVisionCapableModel } from "../vision.js";
+import { sseLines, toolResultText } from "./types.js";
+import type { ChatAdapter, ChatMessage, ToolResultPart, TurnRequest, TurnResult } from "./types.js";
 
 export class OpenAICompatAdapter implements ChatAdapter {
   constructor(private cfg: ProviderConfig) {}
@@ -22,7 +23,7 @@ export class OpenAICompatAdapter implements ChatAdapter {
       body: JSON.stringify({
         model: req.model,
         max_tokens: req.maxTokens ?? 8192,
-        messages: [{ role: "system", content: req.system }, ...toWire(req.messages)],
+        messages: [{ role: "system", content: req.system }, ...toWire(req.messages, isVisionCapableModel(req.model))],
         tools: req.tools.map((t) => ({
           type: "function",
           function: { name: t.name, description: t.description, parameters: t.input_schema },
@@ -109,8 +110,21 @@ function safeJson(s: string): unknown {
   try { return s ? JSON.parse(s) : {}; } catch { return { _raw: s }; }
 }
 
-/** Translate neutral messages to OpenAI wire format. */
-function toWire(messages: ChatMessage[]) {
+/**
+ * Translate neutral messages to OpenAI wire format. Exported for direct unit
+ * testing (test/provider-image-wire.test.ts) — pure, no network.
+ *
+ * Image handling: the OpenAI `role: "tool"` message officially takes STRING
+ * content only — image parts can't ride inside it. So a tool_result carrying
+ * image parts (loop.ts's rich form) emits its text as the tool message
+ * (annotated so the model knows a screenshot follows), and the image itself
+ * as a data:-URI `image_url` part in ONE follow-up `role: "user"` message
+ * per neutral user turn — the shape vision-capable chat/completions models
+ * accept. When `visionCapable` is false the tool message instead carries the
+ * shared honest placeholder text and no user image message is emitted at all
+ * (sending image_url to a non-vision model/endpoint is a hard 4xx).
+ */
+export function toWire(messages: ChatMessage[], visionCapable: boolean) {
   const out: any[] = [];
   for (const m of messages) {
     if (m.role === "assistant") {
@@ -128,10 +142,35 @@ function toWire(messages: ChatMessage[]) {
       out.push(msg);
     } else {
       const results = m.content.filter((b) => b.type === "tool_result") as any[];
+      // image parts deferred out of tool messages — see doc comment above
+      const pendingImages: Extract<ToolResultPart, { type: "image" }>[] = [];
       for (const r of results) {
+        let text = toolResultText(r.content);
+        const images: Extract<ToolResultPart, { type: "image" }>[] =
+          typeof r.content === "string" ? [] : r.content.filter((p: ToolResultPart) => p.type === "image" && p.base64);
+        if (images.length) {
+          if (visionCapable) {
+            pendingImages.push(...images);
+            text += "\n[the screenshot from this tool call is attached in the next user message]";
+          } else {
+            text += `\n${IMAGE_UNSUPPORTED_PLACEHOLDER}`;
+          }
+        }
         // OpenAI wire has no is_error flag — surface failure in the content
-        const content = r.is_error ? `[tool failed] ${r.content}` : r.content;
+        const content = r.is_error ? `[tool failed] ${text}` : text;
         out.push({ role: "tool", tool_call_id: r.tool_use_id, content });
+      }
+      if (pendingImages.length) {
+        out.push({
+          role: "user",
+          content: [
+            { type: "text", text: "[screenshot(s) captured by the tool call(s) above]" },
+            ...pendingImages.map((p) => ({
+              type: "image_url",
+              image_url: { url: `data:${p.mimeType};base64,${p.base64}` },
+            })),
+          ],
+        });
       }
       const text = m.content.filter((b) => b.type === "text").map((b: any) => b.text).join("");
       if (text) out.push({ role: "user", content: text });
