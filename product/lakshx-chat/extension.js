@@ -9,6 +9,7 @@ const { CHANGELOG } = require("./changelog.js");
 const diagnostics = require("./diagnostics.js");
 const { discoverCommands, expandCommandBody } = require("./commands.js");
 const { AcpClient } = require("./acp-client.js");
+const { buildCrashContext } = require("./crash-context.js");
 
 // ---------- runtime discovery ----------
 const isWin = process.platform === "win32";
@@ -422,6 +423,172 @@ function extractToolOutputText(u) {
   }
 }
 
+// ---------- "Explain this crash" (docs/research/15-ide-feature-roadmap.md
+// item #8): hook the debug-adapter-protocol exception event to the existing
+// agent — no new debugger UI, no new agent-side tool. Detection lives here
+// (vscode.debug + raw DAP messages); prompt assembly is crash-context.js
+// (pure, unit-tested); sending reuses AgentViewProvider.sendPrompt() exactly
+// like a typed message, via its extraContext param (see above). ----------
+//
+// Skips absurdly large files for the crash-line excerpt — a stack frame
+// pointing at a huge generated/data file isn't a useful source excerpt
+// anyway, and reading it in full on every exception stop would be wasteful.
+const MAX_CRASH_EXCERPT_FILE_BYTES = 5_000_000;
+
+// A completed background task or a runaway loop can throw the same
+// exception on nearly every iteration — this debounce keeps a single
+// hot-looping crash from spamming one notification per exception. Purely a
+// UX nicety on top of the real noise control (the notification never
+// auto-sends to the agent by itself; see debugExplain.enabled/autoSend).
+const CRASH_NOTIFY_DEBOUNCE_MS = 4000;
+
+/** True only for a DAP `stopped` event whose `body.reason` is `"exception"` — every other field on `message` is left untouched/unchecked here. */
+function isDapExceptionStop(message) {
+  return message?.type === "event" && message.event === "stopped" && message.body?.reason === "exception";
+}
+
+/** Best-effort read of `absPath` for the crash excerpt. Never throws; returns null for anything unreadable/oversized. */
+function readExcerptSourceText(absPath) {
+  try {
+    const stat = fs.statSync(absPath);
+    if (!stat.isFile() || stat.size > MAX_CRASH_EXCERPT_FILE_BYTES) return null;
+    return fs.readFileSync(absPath, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/** True only if `absPath` is a real path inside the current workspace root — the excerpt is never read for a file outside it. */
+function isPathInWorkspace(absPath) {
+  const root = workspaceRoot();
+  if (!root || typeof absPath !== "string") return false;
+  const rootWithSep = root.endsWith(path.sep) ? root : root + path.sep;
+  return absPath === root || absPath.startsWith(rootWithSep);
+}
+
+/**
+ * Fetch `exceptionInfo` + `stackTrace` over DAP while `session` is still
+ * stopped on the exception — both customRequests are only valid in that
+ * window, so this MUST run synchronously off the `stopped` event, never
+ * deferred to "whenever the user clicks the notification" (see
+ * AgentViewProvider.lastCrashContext's doc comment: capture is eager, send
+ * is lazy off the cache). Never throws — every DAP field here is optional
+ * and adapter-dependent (task requirement: degrade gracefully rather than
+ * assume a rigid schema); a request that fails or an adapter that doesn't
+ * implement it just yields less context, not an error.
+ */
+async function captureCrashContext(session, threadId) {
+  let exceptionInfo = null;
+  try {
+    exceptionInfo = await session.customRequest("exceptionInfo", { threadId });
+  } catch {
+    // adapter doesn't implement it, or the session already moved on — degrade
+  }
+  let stackFrames = null;
+  try {
+    const res = await session.customRequest("stackTrace", { threadId, startFrame: 0, levels: 20 });
+    stackFrames = res?.stackFrames ?? null;
+  } catch {
+    // same degrade-gracefully rule as above
+  }
+  const topPath = stackFrames?.[0]?.source?.path;
+  const excerptText = topPath && isPathInWorkspace(topPath) ? readExcerptSourceText(topPath) : null;
+  return buildCrashContext({ exceptionInfo, stackFrames, excerptText });
+}
+
+/**
+ * Send a captured crash context through the EXISTING send path — focuses/
+ * opens the chat panel first (same "focus then post" precedent as
+ * `lakshx.addSelectionToChat` below), then calls `sendPrompt()` exactly like
+ * a typed message would, just with `extraContext` carrying the `<exception>`
+ * block instead of file-attachment chips.
+ */
+async function triggerExplainCrash(provider, ctx) {
+  const use = ctx ?? provider.lastCrashContext;
+  if (!use) {
+    vscode.window.showInformationMessage(
+      "LakshX: no crash details captured yet — this works right after an exception stops the debugger.",
+    );
+    return;
+  }
+  await vscode.commands.executeCommand("lakshx.chatView.focus");
+  await provider.sendPrompt(use.displayText, [], use.promptBlock);
+}
+
+/**
+ * Runs once per DAP `stopped`/exception event: capture, cache, then either
+ * auto-send (`lakshx.debugExplain.autoSend`), show a dismissible notification
+ * with an action button (`lakshx.debugExplain.enabled`, the default), or do
+ * neither (still leaves the cache populated so the manual
+ * `lakshx.explainCrash` command works even with the notification off or
+ * already dismissed).
+ */
+async function handleExceptionStop(provider, session, threadId) {
+  const ctx = await captureCrashContext(session, threadId);
+  provider.lastCrashContext = ctx;
+
+  const cfg = vscode.workspace.getConfiguration("lakshx");
+  const autoSend = cfg.get("debugExplain.autoSend", false);
+  const enabled = cfg.get("debugExplain.enabled", true);
+
+  if (autoSend) {
+    await triggerExplainCrash(provider, ctx);
+    return;
+  }
+  if (!enabled) return;
+
+  // Debounce identical repeat notifications (e.g. an exception re-thrown on
+  // every loop iteration) — keyed on the crash context's own text since DAP
+  // doesn't hand us a stable exception identity to key on instead.
+  const key = ctx.displayText + "|" + ctx.promptBlock;
+  const now = Date.now();
+  if (provider._lastCrashNotifyKey === key && now - provider._lastCrashNotifyAt < CRASH_NOTIFY_DEBOUNCE_MS) return;
+  provider._lastCrashNotifyKey = key;
+  provider._lastCrashNotifyAt = now;
+
+  const label = ctx.displayText.replace(/^Explain this crash:\s*/, "");
+  const message = label
+    ? `LakshX: unhandled exception detected (${label}) — Explain with LakshX?`
+    : "LakshX: unhandled exception detected — Explain with LakshX?";
+  const choice = await vscode.window.showInformationMessage(message, "Explain with LakshX");
+  if (choice) await triggerExplainCrash(provider, ctx);
+}
+
+/**
+ * Registers the one hook this whole feature needs: a
+ * `DebugAdapterTrackerFactory` for every debug type (`"*"`), watching raw DAP
+ * messages for a `stopped`/`reason:"exception"` event via
+ * `onDidSendMessage`. This is deliberately the ONLY new vscode.debug surface
+ * touched — no new views, no new debugger UI, per the feature's scope.
+ *
+ * `onDidSendMessage` is synchronous or must behave as if it is — the actual
+ * work (`handleExceptionStop`) is async, so it's kicked off fire-and-forget
+ * with its own `.catch`, and the whole body is wrapped in try/catch too:
+ * this tracker must NEVER throw, since an uncaught exception here would come
+ * from inside VS Code's own debug-adapter message pump, not from user code.
+ */
+function registerCrashExplainTracker(context, provider) {
+  context.subscriptions.push(
+    vscode.debug.registerDebugAdapterTrackerFactory("*", {
+      createDebugAdapterTracker(session) {
+        return {
+          onDidSendMessage(message) {
+            try {
+              if (!isDapExceptionStop(message)) return;
+              const threadId = message.body?.threadId;
+              handleExceptionStop(provider, session, threadId).catch((err) => {
+                provider.log.appendLine(`explain-crash: failed to handle exception stop: ${err.message}`);
+              });
+            } catch (err) {
+              provider.log.appendLine(`explain-crash: tracker error: ${err.message}`);
+            }
+          },
+        };
+      },
+    }),
+  );
+}
+
 class AgentViewProvider {
   constructor(context) {
     this.context = context;
@@ -449,6 +616,17 @@ class AgentViewProvider {
     // its own file lists straight off the "checkpoint" transcript events
     // (grouped by promptId), not from this map.
     this.fileCheckpoints = new Map();
+
+    // ---------- "Explain this crash" (docs/research/15 item #8) ----------
+    // Most recently captured DAP exception-stop context (see
+    // captureCrashContext() below), cached here so BOTH the notification's
+    // action button AND the manually-triggered `lakshx.explainCrash` command
+    // can send it — capture must happen eagerly while the adapter is still
+    // stopped (exceptionInfo/stackTrace only work then), but sending is
+    // always lazy, off this cache, never re-fetched at click time.
+    this.lastCrashContext = null;
+    this._lastCrashNotifyKey = null;
+    this._lastCrashNotifyAt = 0;
   }
 
   /** Snapshot handed to a freshly (re)connecting phone — see remote-server.js's GET /state. */
@@ -1069,8 +1247,16 @@ class AgentViewProvider {
    * user typed) and instead expanded into `<file>` blocks that are
    * prepended only to the text actually sent to the runtime. This is a
    * pure text-assembly step — no protocol/runtime changes.
+   *
+   * `extraContext`, if given, is a single already-built block of text (e.g.
+   * the "Explain this crash" flow's `<exception>...</exception>` block from
+   * crash-context.js) prepended to the outgoing prompt the same way — kept
+   * out of the displayed/persisted `text` exactly like an attachment's
+   * `<file>` block is. This is the ONLY hook a non-composer caller needs:
+   * everything else about the turn (turnInProgress guard, promptId, event
+   * posting, error handling) is identical to a normal typed send.
    */
-  async sendPrompt(text, attachments = []) {
+  async sendPrompt(text, attachments = [], extraContext = "") {
     // Race guard (docs/research/10 Phase B): the desktop composer and the
     // phone's POST /control/send both funnel through here. Whichever call
     // gets here first wins the turn; the other is a silent no-op rather than
@@ -1098,6 +1284,7 @@ class AgentViewProvider {
       if (!this.chatTitle) this.chatTitle = displayText.slice(0, 48);
       this.post({ type: "turnStart" });
       const blocks = attachments.map(buildFileBlock).filter(Boolean);
+      if (extraContext) blocks.unshift(extraContext);
       const promptText = blocks.length ? `${blocks.join("\n\n")}\n\n${displayText}` : displayText;
       try {
         const res = await this.acp.request("session/prompt", {
@@ -1989,7 +2176,10 @@ async function activate(context) {
     vscode.window.onDidChangeActiveTextEditor(() => provider.refreshFileHasCheckpointContext()),
     vscode.workspace.registerTextDocumentContentProvider("lakshx-checkpoint", checkpointContentProvider),
     vscode.window.registerFileDecorationProvider(checkpointDecorationProvider),
+    // ---------- "Explain this crash" (docs/research/15 item #8) ----------
+    vscode.commands.registerCommand("lakshx.explainCrash", () => triggerExplainCrash(provider)),
   );
+  registerCrashExplainTracker(context, provider);
 }
 
 function deactivate() {}

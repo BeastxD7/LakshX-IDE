@@ -78,6 +78,10 @@
         "command": "lakshx.undoFileChanges",
         "title": "Undo Agent Changes",
         "icon": "$(discard)"
+      },
+      {
+        "command": "lakshx.explainCrash",
+        "title": "LakshX: Explain This Crash"
       }
     ],
     "keybindings": [
@@ -116,6 +120,12 @@
           "command": "lakshx.addSelectionToChat",
           "group": "lakshx@1"
         }
+      ],
+      "debug/callstack/context": [
+        {
+          "command": "lakshx.explainCrash",
+          "group": "lakshx@1"
+        }
       ]
     },
     "configuration": {
@@ -125,6 +135,16 @@
           "type": "string",
           "default": "",
           "description": "Command to launch the LakshX Agent Runtime (ACP over stdio). Empty = auto-detect the bundled runtime."
+        },
+        "lakshx.debugExplain.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "When a debug session stops on an unhandled exception, show a dismissible notification offering to explain it with LakshX. Turning this off does not disable 'LakshX: Explain This Crash' from the command palette — it still works off the most recently captured exception."
+        },
+        "lakshx.debugExplain.autoSend": {
+          "type": "boolean",
+          "default": false,
+          "description": "Zero-click: automatically send the crash context to LakshX as soon as a debug session stops on an unhandled exception, instead of showing a notification first. Off by default."
         }
       }
     }
