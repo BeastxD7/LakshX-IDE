@@ -596,7 +596,17 @@ class AgentViewProvider {
       try {
         const res = await this.acp.request("session/load", { sessionId: resumeSessionId, cwd, mcpServers: [] });
         this.sessionId = resumeSessionId;
-        if (res?.modes?.currentModeId) this.mode = res.modes.currentModeId;
+        // The agent's persisted session.mode is authoritative on resume — the
+        // mode selector must reflect it, not whatever the client last had
+        // (e.g. a chat-JSON `mode` that drifted from the agent's). Push a
+        // modeChanged so the dropdown honors ground truth and the two can't
+        // silently diverge across reconnect/load (auto:false — this is a
+        // sync, not a plan-driven auto-switch, so no "switched to X" notice).
+        if (res?.modes?.currentModeId) {
+          this.mode = res.modes.currentModeId;
+          this.view?.webview.postMessage({ type: "modeChanged", mode: this.mode, auto: false });
+          this.remote?.broadcast({ type: "modeChanged", mode: this.mode, auto: false });
+        }
         return;
       } catch (err) {
         this.log.appendLine(`session/load failed for ${resumeSessionId}, starting fresh: ${err.message}`);
@@ -604,6 +614,20 @@ class AgentViewProvider {
     }
     const s = await this.acp.request("session/new", { cwd, mcpServers: [] });
     this.sessionId = s.sessionId;
+    // A fresh agent session always starts in review (server.ts session/new).
+    // Sync the mode selector to that ground truth: after an agent crash +
+    // respawn, onExit nulls the session but leaves `this.mode` (e.g. "auto"),
+    // so without this the dropdown would keep showing the pre-crash mode while
+    // the new session actually runs review — a silent UI/agent divergence
+    // (requirement: dropdown reflects the real session.mode). Mirrors the
+    // resume branch above; never auto-restores royal (a fresh session is
+    // review, so the royal consent gate is untouched).
+    const fresh = s?.modes?.currentModeId ?? "review";
+    if (this.mode !== fresh) {
+      this.mode = fresh;
+      this.view?.webview.postMessage({ type: "modeChanged", mode: fresh, auto: false });
+      this.remote?.broadcast({ type: "modeChanged", mode: fresh, auto: false });
+    }
   }
 
   onSessionUpdate(u) {

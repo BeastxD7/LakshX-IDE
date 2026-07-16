@@ -103,6 +103,14 @@ acp
     sessions.set(sessionId, {
       cwd: cwd ?? saved.cwd,
       mode: saved.mode,
+      // Seed the mode-switch reminder baseline (loop.ts) with the restored
+      // mode: a first post-load turn with no switch then stays silent, while
+      // a switch AFTER a load — the strongest anchoring case, since the whole
+      // review-mode transcript was just replayed into history — correctly
+      // fires the "[System note — the operating mode was just changed…]"
+      // reminder. Without this it would be `undefined` after a load and the
+      // first switch would be silently missed.
+      announcedMode: saved.mode,
       model: saved.model,
       history: saved.history,
       checkpoints: saved.checkpoints ?? [],
