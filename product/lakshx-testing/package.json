@@ -1,0 +1,38 @@
+{
+  "name": "lakshx-testing",
+  "displayName": "LakshX Testing",
+  "description": "Makes VS Code's native test-run gutter and coverage highlighting genuinely on by default and well-configured — a configuration/enablement layer over the built-in Testing API, not a custom test runner.",
+  "version": "0.0.1",
+  "publisher": "lakshx",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.128.0"
+  },
+  "main": "./extension.js",
+  "scripts": {
+    "test:unit": "node --test test/*.test.js"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "configurationDefaults": {
+      "testing.automaticallyOpenPeekView": "failureInVisibleDocument",
+      "testing.automaticallyOpenTestResults": "openOnTestFailure",
+      "testing.gutterEnabled": true,
+      "testing.defaultGutterClickAction": "runWithCoverage",
+      "testing.showCoverageInExplorer": true,
+      "testing.coverageToolbarEnabled": true,
+      "testing.coverageMinimapEnabled": true,
+      "testing.displayedCoveragePercent": "totalCoverage",
+      "testing.coverageBarThresholds": {
+        "red": 0,
+        "yellow": 60,
+        "green": 90
+      },
+      "testing.countBadge": "failed",
+      "testing.followRunningTest": true,
+      "testing.saveBeforeTest": true
+    }
+  }
+}
