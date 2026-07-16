@@ -325,12 +325,21 @@ export function formatTaskNotifications(
   userText: string,
 ): string {
   const clip = (s: string) => (s.length > REPORT_CLIP ? s.slice(0, REPORT_CLIP) + "\n…[report truncated]" : s);
-  const escape = (s: string) => s.replace(/<\/task_notification>/g, "&lt;/task_notification&gt;");
+  // Escape ALL angle brackets (and & first, standard entity-escaping order) —
+  // not just the literal `</task_notification>` string. A model-authored
+  // `prompt` or a child's `output` is untrusted text that could otherwise
+  // forge ANY boundary tag (a fake `<user_message>`, an early `<task_
+  // notification>` open, etc.), not only the one closing tag this function
+  // used to special-case. Both fields go through this — a security audit
+  // (2026-07-17) found `prompt` was passed through bare `JSON.stringify`,
+  // which does not escape `<`/`>`, leaving a two-hop (laundered-through-a-
+  // model-authored-field) envelope-break/consent-forging gap.
+  const escape = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const blocks = events
     .map(
       (e) =>
         `<task_notification taskId="${e.taskId}" status="${e.status}" durationMs="${e.durationMs}">\n` +
-        `Prompt: ${JSON.stringify(e.prompt)}\n` +
+        `Prompt: ${escape(JSON.stringify(e.prompt))}\n` +
         `Final report:\n${escape(clip(e.output))}\n` +
         `</task_notification>`,
     )
