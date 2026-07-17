@@ -288,7 +288,7 @@
           <circle cx="512" cy="512" r="34" fill="#c8b6ff"/>
         </svg>
         <div>
-          <div class="kicker">Product Pitch — YC · Microsoft for Startups · AWS Activate</div>
+          <div class="kicker">Product Pitch — AWS Activate</div>
           <div class="wordmark">LakshX<sup>IDE</sup></div>
         </div>
       </div>
@@ -540,21 +540,45 @@
     </div>
   </section>
 
-  <!-- 15 : THE ASK -->
+  <!-- 15 : WHY AWS -->
   <section class="slide">
     <div class="body-area">
-      <div class="kicker">What we're applying for</div>
-      <h2>Fuel for the single-player product's growth, and the infrastructure the multiplayer bet needs.</h2>
-      <div class="ask-grid">
-        <div class="card ask-card"><div class="who">YC</div><div class="desc">Speed and rigor on GTM — turning five design-partner teams into a repeatable enterprise motion.</div></div>
-        <div class="card ask-card"><div class="who">Microsoft for Startups</div><div class="desc">Azure credits to host the shared Agent Brain service, plus a natural distribution channel through VS Code's own ecosystem.</div></div>
-        <div class="card ask-card"><div class="who">AWS Activate</div><div class="desc">Compute credits for the trace/index infrastructure a team-scale Brain runs on, at the scale a pilot cohort needs.</div></div>
+      <div class="kicker">Why this is an AWS-shaped ask</div>
+      <h2>Agent Brain isn't a feature we bolt on. It's a compute and storage problem — the kind AWS Activate exists to fund.</h2>
+      <div class="grid-2" style="margin-top: 8px;">
+        <div class="card">
+          <div class="label">A shared trace/index service is infrastructure, full stop</div>
+          <div class="desc">A project-level trace and index store that every teammate's agent queries means a real multi-tenant backend — compute for indexing and query, storage for a growing trace history, networking and auth in front of it. That doesn't run on a laptop or ship as a client-side feature; it needs real cloud infrastructure to exist at all.</div>
+        </div>
+        <div class="card">
+          <div class="label">We're extending something that already runs — not speculating from zero</div>
+          <div class="desc">The local trace store and background-subagent registry are shipped and running today, on a single machine. A cloud-hosted, multi-tenant Agent Brain is the direct next step of infrastructure already proven to work, not an unproven bet.</div>
+        </div>
+      </div>
+      <p class="diagram-caption">Compute credits are the difference between "the trace/index service exists in our architecture doc" and "the trace/index service exists" — for real, at the scale a pilot cohort's traffic actually generates.</p>
+    </div>
+  </section>
+
+  <!-- 16 : THE ASK -->
+  <section class="slide">
+    <div class="body-area">
+      <div class="kicker">What we're applying for — AWS Activate</div>
+      <h2>Compute for the infrastructure the multiplayer bet needs, and the architecture guidance to build it safely.</h2>
+      <div class="grid-2" style="margin-top: 8px;">
+        <div class="card">
+          <div class="label">Compute credits</div>
+          <div class="desc">Compute credits for the trace/index infrastructure a team-scale Agent Brain runs on, at the scale a real pilot cohort needs — indexing, query, and storage for a shared, always-growing trace history across every teammate's agent, not a single laptop's workload.</div>
+        </div>
+        <div class="card">
+          <div class="label">Architecture & solutions-architect support</div>
+          <div class="desc">AWS Activate's technical guidance — solutions-architect access — to design that multi-tenant service properly the first time. A shared, cross-teammate trace index literally contains everyone's tool-call history; getting the tenancy and isolation model right at the design stage matters more than fixing it after an incident.</div>
+        </div>
       </div>
       <p class="diagram-caption">Raise amount, equity, and cohort details: fill in before submitting — deliberately left open here.</p>
     </div>
   </section>
 
-  <!-- 16 : CLOSING -->
+  <!-- 17 : CLOSING -->
   <section class="slide">
     <div class="body-area">
       <div class="kicker">Where this goes</div>
@@ -571,7 +595,7 @@
 
 <div id="chrome">
   <div id="dots"></div>
-  <div id="counter">01 / 16</div>
+  <div id="counter">01 / 17</div>
   <div id="nav-btns">
     <button class="navbtn" id="prevBtn" aria-label="Previous slide">Prev</button>
     <button class="navbtn" id="nextBtn" aria-label="Next slide">Next</button>
