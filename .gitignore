@@ -8,9 +8,14 @@ out/
 .DS_Store
 .env
 
-# packaged build output
+# packaged build output (OS-Build/*.sh|.ps1 produce these at the repo root)
 /VSCode-darwin-arm64/
+/VSCode-win32-x64/
+/VSCode-linux-x64/
 *.zip
+*.dmg
+*.exe
+*.deb
 
 # LakshX agent runtime artifacts from dogfooding this repo as a workspace —
 # review-mode plan drafts (agent/src/server.ts's savePlan) are local scratch
