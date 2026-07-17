@@ -36,12 +36,34 @@ function pcmFromMessage(raw) {
 // ---------- runtime discovery ----------
 const isWin = process.platform === "win32";
 
+/**
+ * Locate the editor's own bundled ripgrep binary, so the agent's grep tool
+ * works on machines with no system-wide `rg` install (which was the actual,
+ * always-reproducible failure mode reported: a fresh machine has no rg on
+ * PATH, and this lookup was silently finding nothing, so LAKSHX_RG_PATH
+ * never got set and the tool fell back to a bare "rg" that doesn't exist).
+ *
+ * VS Code has shipped this dependency under two different shapes across
+ * versions — check both instead of assuming one:
+ *   - @vscode/ripgrep (older): flat  .../ripgrep/bin/rg[.exe]
+ *   - @vscode/ripgrep-universal (current, this build): per-platform
+ *     .../ripgrep-universal/bin/<os>-<arch>/rg[.exe] — one npm package
+ *     bundling every platform's binary, picked by folder name at runtime
+ *     (mirrors that package's own lib/index.js: binPathFor({os, arch})).
+ */
+function findBundledRg() {
+  const binaryName = isWin ? "rg.exe" : "rg";
+  const candidates = [
+    path.join(vscode.env.appRoot, "node_modules", "@vscode", "ripgrep-universal", "bin", `${process.platform}-${process.arch}`, binaryName),
+    path.join(vscode.env.appRoot, "node_modules", "@vscode", "ripgrep", "bin", binaryName),
+  ];
+  return candidates.find((p) => fs.existsSync(p));
+}
+
 function runtimeEnv() {
-  // point the agent's grep tool at the editor's bundled ripgrep so it works
-  // on machines without rg installed (all platforms)
-  const rg = path.join(vscode.env.appRoot, "node_modules", "@vscode", "ripgrep", "bin", isWin ? "rg.exe" : "rg");
+  const rg = findBundledRg();
   const env = { ...process.env };
-  if (fs.existsSync(rg)) env.LAKSHX_RG_PATH = rg;
+  if (rg) env.LAKSHX_RG_PATH = rg;
   return env;
 }
 
