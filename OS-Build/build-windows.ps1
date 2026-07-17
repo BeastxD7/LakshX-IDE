@@ -242,6 +242,76 @@ function Check-Msvc {
 	}
 }
 
+# VS Code's native modules (e.g. @vscode/native-watchdog) compile with Spectre
+# mitigation, so MSBuild needs the Spectre-mitigated VC++ libs. These are a
+# SEPARATE VS component that "Desktop development with C++" / --includeRecommended
+# does NOT pull in - without them `npm ci` dies with MSB8040 partway through,
+# AFTER the multi-minute fetch + install. Catch it here so the gate fails fast.
+function Check-Spectre {
+	$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+	if (-not (Test-Path $vswhere)) { return }   # no VS at all -> Check-Msvc already FAILs
+	$vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
+	if (-not $vsPath) { return }
+	$msvcRoot = Join-Path $vsPath 'VC\Tools\MSVC'
+	if (-not (Test-Path $msvcRoot)) { return }  # toolset not laid down yet; MSVC row covers it
+
+	# Any installed toolset with a lib\spectre\<arch> dir satisfies the requirement.
+	$tsDirs = @(Get-ChildItem $msvcRoot -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending)
+	foreach ($d in $tsDirs) {
+		if ((Test-Path (Join-Path $d.FullName 'lib\spectre\x64')) -or
+		    (Test-Path (Join-Path $d.FullName 'lib\spectre\x86'))) {
+			Pf-Pass 'Spectre-mitigated libs' "present ($($d.Name))"
+			return
+		}
+	}
+
+	# Missing -> build the exact, version-matched component ID for the auto-fix:
+	#   Microsoft.VisualStudio.Component.VC.<tsMajor>.<tsMinor>.<vsMajor>.<vsMinor>.x86.x64.Spectre
+	$comp = 'Microsoft.VisualStudio.Component.VC.14.44.17.14.x86.x64.Spectre'   # sane default (VS 17.14 / MSVC 14.44)
+	$vsVer = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationVersion 2>$null
+	if ($tsDirs.Count -ge 1 -and $vsVer) {
+		$tp = $tsDirs[0].Name.Split('.'); $vp = "$vsVer".Split('.')
+		if ($tp.Count -ge 2 -and $vp.Count -ge 2) {
+			$comp = "Microsoft.VisualStudio.Component.VC.$($tp[0]).$($tp[1]).$($vp[0]).$($vp[1]).x86.x64.Spectre"
+		}
+	}
+	$vsInst = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vs_installer.exe'
+
+	# Pin the modify to this instance's own release channel + product. After the
+	# VS Installer self-updates it defaults to the NEXT major's channel; an
+	# unqualified modify then tries to migrate (e.g. to v18), finds no v18 product,
+	# and dies with "installed product cannot be found" (exit 1). channelId is
+	# derived from the installed major; productId comes straight from vswhere.
+	$chanId = 'VisualStudio.17.Release'
+	if ($vsVer) { $vMaj = "$vsVer".Split('.')[0]; if ($vMaj) { $chanId = "VisualStudio.$vMaj.Release" } }
+	$prodId = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property productId 2>$null
+	if (-not $prodId) { $prodId = 'Microsoft.VisualStudio.Product.BuildTools' }
+
+	# The auto-fix must:
+	#   1. self-elevate  - a --quiet modify refuses to run un-elevated (exit 5007);
+	#   2. quote installPath - Start-Process -ArgumentList does NOT auto-quote the
+	#      spaced path, which truncates it at "C:\Program" -> product not found;
+	#   3. NOT pass --wait - vs_installer rejects that flag (exit 87). -Wait below
+	#      is the Start-Process switch (waits on setup.exe), not a vs_installer arg.
+	# Build the command string with explicit quote chars (no backtick-escape soup):
+	# each -ArgumentList element is single-quoted; the installPath element also
+	# carries embedded double-quotes so setup.exe receives the spaced path intact.
+	$dq = [string][char]34; $q = [string][char]39
+	$pathTok = $q + $dq + $vsPath + $dq + $q
+	$parts = @(
+		($q + 'modify' + $q),
+		($q + '--installPath' + $q), $pathTok,
+		($q + '--channelId' + $q), ($q + $chanId + $q),
+		($q + '--productId' + $q), ($q + $prodId + $q),
+		($q + '--add' + $q), ($q + $comp + $q),
+		($q + '--quiet' + $q), ($q + '--norestart' + $q)
+	)
+	$fix = 'Start-Process -Verb RunAs -Wait -FilePath ' + $dq + $vsInst + $dq + ' -ArgumentList ' + ($parts -join ',')
+	Pf-Fail 'Spectre-mitigated libs' 'not installed (VS Code native modules need /Qspectre -> MSB8040 mid-build)' `
+		'Add the Spectre-mitigated VC++ libs (VS Installer -> Individual components)' `
+		$fix 'sync' 'Install the Spectre-mitigated libs now (self-elevating - approve the UAC prompt)? [y/N]'
+}
+
 # Inno Setup ships as the `innosetup` npm devDependency (installed by upstream
 # `npm ci`) - no separate system install is required. Reported as info only.
 function Check-InnoSetup {
@@ -289,6 +359,7 @@ function Invoke-WindowsGate {
 	Check-Bash
 	Check-Python
 	Check-Msvc
+	Check-Spectre
 	Check-InnoSetup
 	Check-Disk
 	Check-Repo
@@ -325,6 +396,7 @@ function Invoke-PfFixes {
 		Write-Host "`n  Fixable: $($row.Name)" -ForegroundColor White
 		switch ($row.FixKind) {
 			'guided' { Write-Host '    (guided - opens/uses an installer; NOT a silent auto-install)' }
+			'sync'   { Write-Host '    (self-elevating installer - approve the UAC prompt; waits for completion, then the gate re-checks automatically)' }
 			'shell'  { Write-Host '    (real install; nvm applies to a NEW shell - you will be asked to re-run afterwards)' }
 		}
 		Write-Host "    Command to run: $($row.FixCmd)" -ForegroundColor Cyan

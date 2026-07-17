@@ -61,9 +61,12 @@ refreshes this shell's PATH from the registry so the just-installed Node/Python
 are visible **without reopening the terminal**, then runs the build:
 
 ```powershell
-# 1. Prerequisites (approve the UAC prompt VS Build Tools raises)
+# 1. Prerequisites (approve the UAC prompt VS Build Tools raises).
+#    NOTE the extra --add for the Spectre-mitigated libs: VS Code's native
+#    modules compile with /Qspectre, and WITHOUT this component `npm ci` dies
+#    partway through with MSB8040. --includeRecommended does NOT pull it in.
 winget install OpenJS.NodeJS.LTS --version 24.18.0 -e --accept-package-agreements --accept-source-agreements
-winget install Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended" --accept-package-agreements --accept-source-agreements
+winget install Microsoft.VisualStudio.2022.BuildTools --override "--quiet --norestart --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.VC.14.44.17.14.x86.x64.Spectre --includeRecommended" --accept-package-agreements --accept-source-agreements
 winget install Python.Python.3.12 -e --accept-package-agreements --accept-source-agreements
 
 # 2. Make this shell see the new installs (MSIs update the registry, not the live shell)
@@ -72,6 +75,22 @@ $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Env
 # 3. Build
 powershell -ExecutionPolicy Bypass -NoProfile -File OS-Build\build-windows.ps1
 ```
+
+If VS Build Tools is **already installed** without the Spectre libs (the gate's
+`Spectre-mitigated libs` row FAILs), add just that component to the existing
+install — this must be launched **elevated** (`--quiet` modifies refuse to
+self-elevate; you'll get exit `5007` otherwise), and vs_installer has **no
+`--wait`** flag (passing it errors with exit `87`):
+
+```powershell
+Start-Process -Verb RunAs -FilePath "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe" -ArgumentList `
+  'modify','--installPath','C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools',`
+  '--add','Microsoft.VisualStudio.Component.VC.14.44.17.14.x86.x64.Spectre','--quiet','--norestart'
+```
+
+(The `...14.44.17.14...` segment pins the component to VS 17.14 / MSVC 14.44 —
+the `-Check` gate now computes the exact ID for **your** installed toolset and
+prints it in the remediation if it differs.)
 
 Notes from the validated run (2026-07-17, Windows 11):
 
@@ -237,10 +256,17 @@ floor; the build writes several GB).
 **Windows** (`build-windows.ps1`)
 
 - **Git for Windows** — the prep step is a bash script, called via `bash`.
+  (You do **not** need to add Git's `bin\` to PATH — the script finds `bash.exe`
+  next to `git.exe` itself.)
 - **Visual Studio Build Tools** with the "Desktop development with C++"
   workload (MSVC toolchain for native modules — `preinstall.ts` hard-requires
-  VS 2022/2019). Inno Setup itself is pulled in by `npm ci` (the `innosetup`
-  devDependency) — no separate install.
+  VS 2022/2019) **plus the Spectre-mitigated VC++ libs** component. The Spectre
+  libs are **not** included by `--includeRecommended` / the C++ workload, yet
+  VS Code's native modules compile with `/Qspectre`, so without them `npm ci`
+  fails mid-build with **MSB8040**. The `-Check` gate now catches this as a
+  dedicated `Spectre-mitigated libs` FAIL row (with the exact vs_installer
+  command for your toolset). Inno Setup itself is pulled in by `npm ci` (the
+  `innosetup` devDependency) — no separate install.
 
 **Linux** (`build-linux.sh`) — Debian/Ubuntu:
 
