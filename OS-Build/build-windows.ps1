@@ -5,11 +5,11 @@
 .DESCRIPTION
   Mirrors the real CI pipeline (.github/workflows/build.yml) for the win32-x64
   target. The prep phase (fetch-vscode / agent bundle / prepare.sh) is written
-  in bash, so this script calls those through Git Bash (`bash`) — the same
+  in bash, so this script calls those through Git Bash (`bash`) - the same
   tested code path CI uses. Git Bash MUST be installed and on PATH.
 
   The installer is produced by Inno Setup via the `innosetup` npm devDependency
-  (installed by upstream `npm ci`) — no extra tooling on the machine.
+  (installed by upstream `npm ci`) - no extra tooling on the machine.
   The two gulp tasks (inno-updater, then system-setup) MUST run as SEPARATE
   invocations (build.yml:236-242).
 
@@ -59,11 +59,11 @@ function Write-Info($msg)  { Write-Host "    $msg" }
 function Die($msg) { Write-Host "ERROR: $msg" -ForegroundColor Red; exit 1 }
 
 # ----------------------------------------------------------------------------
-# Requirements gate — mirrors OS-Build/lib-preflight.sh (the bash builds) with
+# Requirements gate - mirrors OS-Build/lib-preflight.sh (the bash builds) with
 # the SAME collect-all model, the SAME exact preinstall.ts Node check, and the
 # SAME opt-in interactive auto-fix. Re-implemented here because PowerShell can't
 # source the bash helper. NOTE: this .ps1 was NOT run live (no pwsh on the build
-# machine) — it is kept conservative / Windows PowerShell 5.1 compatible.
+# machine) - it is kept conservative / Windows PowerShell 5.1 compatible.
 # ----------------------------------------------------------------------------
 $script:PfRows = New-Object System.Collections.ArrayList
 $script:PfFail = 0
@@ -113,7 +113,7 @@ function Check-Node {
 		# The choco alternative lives in the remediation text, not the command.
 		$fixCmd = "winget install OpenJS.NodeJS.$($r[0])"
 		$fixKind = 'guided'
-		$fixPrompt = "Install Node v$req now via winget? (guided — you may need a new shell / admin) [y/N]"
+		$fixPrompt = "Install Node v$req now via winget? (guided - you may need a new shell / admin) [y/N]"
 	}
 	$nodeRem = "Install Node v$req, major $($r[0]) (winget install OpenJS.NodeJS.$($r[0])  or  choco install nodejs --version $req)"
 	$node = Get-Command node -ErrorAction SilentlyContinue
@@ -166,7 +166,7 @@ function Check-Bash {
 	if ($bash) {
 		Pf-Pass 'bash (Git Bash)' $bash.Source
 	} else {
-		Pf-Fail 'bash (Git Bash)' 'not found on PATH' 'Install Git for Windows — the prepare step is a bash script' `
+		Pf-Fail 'bash (Git Bash)' 'not found on PATH' 'Install Git for Windows - the prepare step is a bash script' `
 			'winget install Git.Git' 'guided' 'Install Git for Windows now via winget? (guided) [y/N]'
 	}
 }
@@ -207,14 +207,14 @@ function Check-Msvc {
 		Pf-Fail 'MSVC toolchain' 'not detected (VS Build Tools / "Desktop development with C++")' `
 			'Install VS Build Tools with the C++ workload (preinstall.ts hard-requires VS 2022/2019)' `
 			'winget install Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"' `
-			'guided' 'Install VS Build Tools (C++) now via winget? (guided — large download, may need admin) [y/N]'
+			'guided' 'Install VS Build Tools (C++) now via winget? (guided - large download, may need admin) [y/N]'
 	}
 }
 
 # Inno Setup ships as the `innosetup` npm devDependency (installed by upstream
-# `npm ci`) — no separate system install is required. Reported as info only.
+# `npm ci`) - no separate system install is required. Reported as info only.
 function Check-InnoSetup {
-	Pf-Pass 'Inno Setup' 'provided by npm ci (innosetup devDependency) — no system install needed'
+	Pf-Pass 'Inno Setup' 'provided by npm ci (innosetup devDependency) - no system install needed'
 }
 
 function Check-Disk {
@@ -230,9 +230,9 @@ function Check-Disk {
 	}
 	$gb = [math]::Round($free / 1GB, 1)
 	if ($free -lt 10GB) {
-		Pf-Fail 'Disk space' "$gb GB free (need >= 10 GB, 25+ recommended)" 'Free up disk space — the build writes several GB' '' '' ''
+		Pf-Fail 'Disk space' "$gb GB free (need >= 10 GB, 25+ recommended)" 'Free up disk space - the build writes several GB' '' '' ''
 	} elseif ($free -lt 25GB) {
-		Pf-Warn 'Disk space' "$gb GB free (low; 25+ GB recommended)" 'Consider freeing space — the build writes several GB' '' '' ''
+		Pf-Warn 'Disk space' "$gb GB free (low; 25+ GB recommended)" 'Consider freeing space - the build writes several GB' '' '' ''
 	} else {
 		Pf-Pass 'Disk space' "$gb GB free"
 	}
@@ -247,7 +247,7 @@ function Check-Repo {
 	if (Test-Path (Join-Path $RepoRoot 'scripts\prepare.sh')) {
 		Pf-Pass 'scripts/prepare.sh' 'present'
 	} else {
-		Pf-Fail 'scripts/prepare.sh' 'missing' 'Repo is incomplete — re-clone; the overlay step needs it' '' '' ''
+		Pf-Fail 'scripts/prepare.sh' 'missing' 'Repo is incomplete - re-clone; the overlay step needs it' '' '' ''
 	}
 }
 
@@ -293,8 +293,8 @@ function Invoke-PfFixes {
 		$any = $true
 		Write-Host "`n  Fixable: $($row.Name)" -ForegroundColor White
 		switch ($row.FixKind) {
-			'guided' { Write-Host '    (guided — opens/uses an installer; NOT a silent auto-install)' }
-			'shell'  { Write-Host '    (real install; nvm applies to a NEW shell — you will be asked to re-run afterwards)' }
+			'guided' { Write-Host '    (guided - opens/uses an installer; NOT a silent auto-install)' }
+			'shell'  { Write-Host '    (real install; nvm applies to a NEW shell - you will be asked to re-run afterwards)' }
 		}
 		Write-Host "    Command to run: $($row.FixCmd)" -ForegroundColor Cyan
 		$prompt = $row.FixPrompt
@@ -308,13 +308,13 @@ function Invoke-PfFixes {
 				if ($row.FixKind -eq 'shell') { $script:PfRerunShell = $true }
 				elseif ($row.FixKind -ne 'guided') { $script:PfDidInstall = $true }
 			} catch {
-				Write-Host "    fix command failed — resolve it manually (see remediation above)." -ForegroundColor Red
+				Write-Host "    fix command failed - resolve it manually (see remediation above)." -ForegroundColor Red
 			}
 		} else {
 			Write-Host '    skipped.'
 		}
 	}
-	if (-not $any) { Write-Host "`n  (no auto-fixable items — resolve the FAIL items above manually)" }
+	if (-not $any) { Write-Host "`n  (no auto-fixable items - resolve the FAIL items above manually)" }
 }
 
 # ----------------------------------------------------------------------------
@@ -322,7 +322,7 @@ function Invoke-PfFixes {
 # ----------------------------------------------------------------------------
 Write-Phase 'Preflight checks'
 
-# Guard on $env:OS only — $IsWindows does not exist on Windows PowerShell 5.1
+# Guard on $env:OS only - $IsWindows does not exist on Windows PowerShell 5.1
 # (the shell `powershell.exe` launches), and StrictMode would throw on it.
 if ($env:OS -ne 'Windows_NT') {
 	Die 'This script only runs on Windows. Use OS-Build/build-macos.sh or build-linux.sh.'
@@ -385,7 +385,7 @@ Command sequence (mirrors .github/workflows/build.yml win32-x64):
   5. (in upstream) npm run gulp vscode-$Target-min      # build.yml:135
   6. (in upstream) npm run gulp vscode-win32-$Arch-inno-updater   # build.yml:241
   7. (in upstream) npm run gulp vscode-win32-$Arch-system-setup   # build.yml:242
-        # steps 6 & 7 MUST be separate invocations — inno-updater populates
+        # steps 6 & 7 MUST be separate invocations - inno-updater populates
         # tools/ that system-setup's ISCC globs (build.yml:211-235)
   8. Copy .build\$Target\system-setup\VSCodeSetup.exe -> $Artifact.exe  # build.yml:251
 "@
@@ -452,4 +452,4 @@ Write-Host ''
 Write-Host 'NOTE: This installer is UNSIGNED. Downloaded copies trigger Windows'
 Write-Host '      SmartScreen ("Windows protected your PC" -> More info -> Run anyway).'
 Write-Host '      Real distribution requires an Authenticode code-signing certificate'
-Write-Host '      (not implemented here — see OS-Build/README.md).'
+Write-Host '      (not implemented here - see OS-Build/README.md).'

@@ -28,14 +28,18 @@ Run this from the repo root, on the machine matching your target OS.
 ```
 
 **Windows** — the script is PowerShell (`.ps1`), **not** a `.sh` file, so how
-you invoke it depends on what you're typing into:
+you invoke it depends on what you're typing into. **`./build.sh` and
+`.\build.sh` do NOT work in a plain `cmd.exe` or plain PowerShell prompt** —
+neither one knows how to run a bash script, and you'll get either
+`'.' is not recognized as an internal or external command` (cmd) or nothing
+useful at all (PowerShell). Use one of these instead:
 
 - From a plain **PowerShell** or **cmd** prompt (most common — do this one):
   ```powershell
   powershell -ExecutionPolicy Bypass -File OS-Build\build-windows.ps1
   ```
-- From **Git Bash** only, `./build.sh` also works — it detects Windows and
-  invokes the `.ps1` for you automatically.
+- From **Git Bash** (the `MINGW64` prompt) **only**, `./build.sh` also works —
+  it detects Windows and invokes the `.ps1` for you automatically.
 
 Add `--check` (mac/linux) or `-Check` (Windows) to any of the above to run
 **only** the requirements gate and print the command sequence, with no actual
@@ -243,7 +247,22 @@ Signing/notarization is deliberately **not** implemented here — document only:
 - The full end-to-end build was **not** run (time/disk); its correctness rests
   on faithfully mirroring `build.yml`, which is the proof the underlying
   commands work.
-- `build-windows.ps1` was **not** run or syntax-checked live (no `pwsh` /
-  Windows on the build machine). Its gate mirrors `lib-preflight.sh` and uses
-  conservative Windows PowerShell 5.1-compatible constructs only — treat it as
-  **unverified-live**.
+- `build-windows.ps1`: **a real user hit a real bug here** (2026-07-17) — the
+  script contained a handful of em-dash characters (`—`, U+2014) inside string
+  literals. The file itself was valid UTF-8 with no BOM, but **Windows
+  PowerShell 5.1 reads a BOM-less `.ps1` using the system's ANSI codepage, not
+  UTF-8** — so the em-dash decoded as garbage, broke that string's quoting, and
+  the parser misread everything after it, cascading into a wall of unrelated-
+  looking errors (missing braces, an `&&`-not-a-separator complaint, etc. — all
+  downstream fallout from the one real break, not independent bugs; confirmed
+  by checking that every literal `&&` in the file is safely inside a quoted
+  string). **Fixed** by removing every non-ASCII character from the file (it's
+  now pure ASCII, 0 bytes outside 0x00-0x7F) — a plain-ASCII script has no
+  encoding dependency at all, regardless of BOM or system codepage. Verified by
+  byte-level inspection (`grep`/`xxd` confirmed 0 non-ASCII bytes remain, and a
+  quote-aware scanner confirmed every `&&` in the file sits inside a string,
+  never a real statement separator) rather than a live PowerShell parse — an
+  attempt to install `pwsh` on the fix machine specifically to double-check
+  this stalled on a slow/failing dependency download and was abandoned rather
+  than block on it; this file is still **unverified against a live PowerShell
+  parser**, only against the exact byte-level failure mode that was observed.
