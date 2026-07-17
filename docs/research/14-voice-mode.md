@@ -87,7 +87,30 @@ streaming partials).
 
 ## Status
 
-Design locked. Implementation is GATED on: (1) the mic-permission spike +
-Electron rebuild, (2) the serial lakshx-chat lane (behind db_query wiring and
-Stage 2), (3) owner sign-off on adding the smart-whisper native dependency +
-model download. Not auto-built — flagged for the owner.
+Shipped: the 3-patch webview mic-permission unblock, push-to-talk capture,
+model download-on-first-use, and smart-whisper transcription are all in
+place (`patches/voice-mode-*.patch`, `product/lakshx-chat/voice.js`,
+`media/panel.js`).
+
+## UX-ordering fix (2026-07-17)
+
+Original flow checked readiness (model downloaded? addon loadable?) only
+*inside* `handleTranscribeAudio`, i.e. after the user had already held the
+mic, seen the recording indicator, and released it — a "sorry, needs
+installing" message only ever arrived after going through the motions.
+Fixed by moving both checks earlier:
+
+- `voice.isModelDownloaded()` (already cheap/synchronous) and the new
+  `voice.isAddonAvailable()` (a `require.resolve` check, never actually
+  loading the addon) are now run on webview boot and included in the `ready`
+  message's `voice: { modelDownloaded, addonAvailable }` field.
+- panel.js's mic button now has real resting states — `needs-setup`
+  (accent-ring, click to trigger download) and `unavailable` (dimmed,
+  build needs a rebuild) — distinct from the red `recording` state, so a
+  not-ready click never looks like it started capturing audio.
+- A click while not-ready sends `{type: "setupVoice"}` instead of arming
+  `getUserMedia`; the host runs `voice.handleSetupVoice()` (same
+  progress-message plumbing as the transcribe path, factored into a shared
+  `downloadModelWithProgress` helper) and replies with one terminal
+  `{type: "voiceSetupDone", ok}`. Only once `ok:true` does the button ever
+  arm the actual recorder.

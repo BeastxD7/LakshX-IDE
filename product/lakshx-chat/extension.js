@@ -2116,6 +2116,24 @@ class AgentViewProvider {
         }
         break;
       }
+      case "setupVoice": {
+        // Fired from a click on the mic button while it's showing its
+        // not-ready state (model not downloaded, or the addon never built) —
+        // never from the actual hold-to-record gesture. Same never-throws,
+        // always-terminal-message discipline as "transcribeAudio" above.
+        try {
+          await voice.handleSetupVoice({
+            isModelDownloaded: () => voice.isModelDownloaded(),
+            ensureModel: (opts) => voice.ensureModel(opts),
+            isAddonAvailable: () => voice.isAddonAvailable(),
+            post: (msg) => this.view?.webview.postMessage(msg),
+          });
+        } catch (err) {
+          this.view?.webview.postMessage({ type: "system", text: `Voice setup failed: ${err.message}` });
+          this.view?.webview.postMessage({ type: "voiceSetupDone", ok: false });
+        }
+        break;
+      }
       case "boot": {
         // Do NOT spawn the agent runtime just because the panel loaded —
         // that used to call ensureAgent() unconditionally on every webview
@@ -2131,7 +2149,16 @@ class AgentViewProvider {
         const state = readProviderState();
         const providers = PROVIDER_IDS.filter((id) => state.set[id]);
         this.currentModel ??= state.defaultModel;
-        this.post({ type: "ready", models: { defaultModel: state.defaultModel, providers } });
+        // Both checks are cheap/synchronous (stat + require.resolve, no
+        // network, no loading the native addon) — safe to always run so the
+        // mic button can show its real state before the user ever clicks it,
+        // instead of only discovering "not actually ready" after a full
+        // record-and-stop round trip (docs/research/14-voice-mode.md).
+        this.post({
+          type: "ready",
+          models: { defaultModel: state.defaultModel, providers },
+          voice: { modelDownloaded: voice.isModelDownloaded(), addonAvailable: voice.isAddonAvailable() },
+        });
         // webview-ready is also when the slash-command popover gets its
         // initial command list (spec: scan on webview ready + on any
         // "refreshCommands"). Cheap local dir scan, no process spawn.

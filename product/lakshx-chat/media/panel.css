@@ -1093,6 +1093,24 @@ button.deny { background: rgba(255, 255, 255, 0.1); color: var(--fg); padding: 4
   cursor: default;
   pointer-events: none;
 }
+/* Not-yet-ready states — deliberately NOT red (that's reserved for "actively
+   recording") so a first click never looks like it started capturing audio
+   before the one-time setup (model download / addon check) has even run. */
+#micBtn.needs-setup {
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+#micBtn.setting-up {
+  color: var(--accent);
+  opacity: 0.6;
+  cursor: default;
+  pointer-events: none;
+  animation: pulse 1s ease-in-out infinite;
+}
+#micBtn.unavailable {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
 
 /* ---------- overlays: settings + history + what's new ---------- */
 #settingsPanel, #historyPanel, #whatsNewPanel {

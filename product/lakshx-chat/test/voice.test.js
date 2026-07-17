@@ -23,6 +23,7 @@ const {
   modelsDir,
   modelPath,
   isModelDownloaded,
+  isAddonAvailable,
   buildTranscribeOptions,
   concatFloat32,
   expectedSampleRate,
@@ -30,6 +31,7 @@ const {
   insertAtCaret,
   joinSegments,
   handleTranscribeAudio,
+  handleSetupVoice,
   MODEL_FILENAME,
   INITIAL_PROMPT,
 } = require("../voice.js");
@@ -60,6 +62,19 @@ test("isModelDownloaded is true once the model file is present", () => {
 
 test("isModelDownloaded is false (not a throw) for an unreadable/garbage home path", () => {
   assert.equal(isModelDownloaded("\0invalid"), false);
+});
+
+// ---------- addon availability ----------
+
+test("isAddonAvailable is true when the injected resolver resolves smart-whisper", () => {
+  assert.equal(isAddonAvailable(() => "/fake/path/to/smart-whisper/index.js"), true);
+});
+
+test("isAddonAvailable is false (not a throw) when the injected resolver throws MODULE_NOT_FOUND", () => {
+  const resolve = () => {
+    throw Object.assign(new Error("Cannot find module 'smart-whisper'"), { code: "MODULE_NOT_FOUND" });
+  };
+  assert.equal(isAddonAvailable(resolve), false);
 });
 
 // ---------- transcribe options ----------
@@ -335,5 +350,96 @@ test("handleTranscribeAudio always ends with exactly one transcribeAudioDone, re
     const doneCount = calls.filter((c) => c.type === "transcribeAudioDone").length;
     assert.equal(doneCount, 1, `expected exactly one transcribeAudioDone, got ${doneCount} for scenario ${JSON.stringify(scenario)}`);
     assert.equal(calls.at(-1).type, "transcribeAudioDone", "transcribeAudioDone must be the LAST message");
+  }
+});
+
+// ---------- handleSetupVoice (the "set up voice before recording" flow) ----------
+//
+// This is the fix for the reported UX bug: readiness must be established
+// BEFORE the mic ever arms, not discovered afterwards. These tests assert
+// the ordering directly — addon check first (cheapest, no I/O), then the
+// model download — and that a not-ready outcome never silently pretends to
+// be ready.
+
+test("handleSetupVoice: addon unavailable posts an explanatory system message and voiceSetupDone:false, without touching the model download", async () => {
+  const { calls, post } = postRecorder();
+  let ensureModelCalled = false;
+  await handleSetupVoice({
+    isModelDownloaded: () => { throw new Error("must not be called — addon check comes first"); },
+    ensureModel: async () => { ensureModelCalled = true; },
+    isAddonAvailable: () => false,
+    post,
+  });
+  assert.equal(ensureModelCalled, false);
+  assert.deepEqual(calls, [
+    {
+      type: "system",
+      text: "Voice input isn't available in this build — the smart-whisper speech engine didn't install correctly. This needs a rebuild, not a retry.",
+    },
+    { type: "voiceSetupDone", ok: false },
+  ]);
+});
+
+test("handleSetupVoice: addon available and model already downloaded posts nothing but voiceSetupDone:true", async () => {
+  const { calls, post } = postRecorder();
+  let ensureModelCalled = false;
+  await handleSetupVoice({
+    isModelDownloaded: () => true,
+    ensureModel: async () => { ensureModelCalled = true; },
+    isAddonAvailable: () => true,
+    post,
+  });
+  assert.equal(ensureModelCalled, false);
+  assert.deepEqual(calls, [{ type: "voiceSetupDone", ok: true }]);
+});
+
+test("handleSetupVoice: addon available but model missing downloads it with progress, then posts a ready message and voiceSetupDone:true", async () => {
+  const { calls, post } = postRecorder();
+  await handleSetupVoice({
+    isModelDownloaded: () => false,
+    ensureModel: async ({ onProgress }) => {
+      onProgress({ receivedMb: 71, totalMb: 142 }); // 50%
+    },
+    isAddonAvailable: () => true,
+    post,
+  });
+  const texts = calls.map((c) => c.text ?? c.type);
+  assert.equal(texts[0], "Downloading speech-to-text model (base.en, ~142MB)... this happens once.");
+  assert.ok(texts[1].includes("50%"), `expected a 50% progress message, got: ${texts[1]}`);
+  assert.equal(texts[2], "Speech-to-text model ready — hold the mic button to dictate.");
+  assert.deepEqual(calls.at(-1), { type: "voiceSetupDone", ok: true });
+});
+
+test("handleSetupVoice: a thrown error from ensureModel becomes a system message and voiceSetupDone:false, never an unhandled rejection", async () => {
+  const { calls, post } = postRecorder();
+  await assert.doesNotReject(
+    handleSetupVoice({
+      isModelDownloaded: () => false,
+      ensureModel: async () => { throw new Error("ENOTFOUND huggingface.co"); },
+      isAddonAvailable: () => true,
+      post,
+    })
+  );
+  assert.deepEqual(calls.at(-1), { type: "voiceSetupDone", ok: false });
+  assert.ok(calls.some((c) => c.type === "system" && c.text.includes("ENOTFOUND")));
+});
+
+test("handleSetupVoice always ends with exactly one voiceSetupDone, regardless of outcome", async () => {
+  for (const scenario of [
+    { addonAvailable: false },
+    { addonAvailable: true, downloaded: true },
+    { addonAvailable: true, downloaded: false },
+    { addonAvailable: true, downloaded: false, throws: true },
+  ]) {
+    const { calls, post } = postRecorder();
+    await handleSetupVoice({
+      isModelDownloaded: () => !!scenario.downloaded,
+      ensureModel: async () => { if (scenario.throws) throw new Error("boom"); },
+      isAddonAvailable: () => scenario.addonAvailable,
+      post,
+    });
+    const doneCount = calls.filter((c) => c.type === "voiceSetupDone").length;
+    assert.equal(doneCount, 1, `expected exactly one voiceSetupDone, got ${doneCount} for scenario ${JSON.stringify(scenario)}`);
+    assert.equal(calls.at(-1).type, "voiceSetupDone", "voiceSetupDone must be the LAST message");
   }
 });

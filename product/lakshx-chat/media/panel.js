@@ -1271,6 +1271,49 @@ function endVoiceTranscribing() {
   }
 }
 
+// Readiness gate — resolved by the host's "ready" boot message before the
+// user ever touches the mic button, and re-resolved after "voiceSetupDone".
+// The point of tracking this client-side (rather than just trying to record
+// and finding out) is that a click while "needs-setup"/"unavailable" must
+// run the (possibly slow, network-bound) setup flow INSTEAD of arming
+// getUserMedia — never record-then-tell-you-it-was-pointless afterwards.
+// See docs/research/14-voice-mode.md.
+const MIC_TITLES = {
+  idle: "Hold to dictate (push-to-talk)",
+  recording: "Recording — release to transcribe",
+  transcribing: "Transcribing…",
+  "needs-setup": "Click to set up voice input (one-time ~142MB download)",
+  "setting-up": "Setting up voice input…",
+  unavailable: "Voice input isn't available in this build",
+};
+let voiceStatus = "needs-setup"; // "needs-setup" | "unavailable" | "ready" — set for real by applyVoiceCapability()
+let settingUp = false;
+
+function setMicState(state) {
+  // state: "idle" | "recording" | "transcribing" | "needs-setup" | "setting-up" | "unavailable"
+  if (!micBtn) return;
+  micBtn.classList.remove("recording", "transcribing", "needs-setup", "setting-up", "unavailable");
+  if (state !== "idle") micBtn.classList.add(state);
+  micBtn.disabled = state === "transcribing" || state === "setting-up";
+  const title = MIC_TITLES[state] || MIC_TITLES.idle;
+  micBtn.title = title;
+  micBtn.setAttribute("aria-label", title);
+}
+
+/** Applies the host's boot-time (or post-setup) capability check to the mic button's resting state. */
+function applyVoiceCapability(v) {
+  if (!micBtn || !v) return;
+  voiceStatus = !v.addonAvailable ? "unavailable" : !v.modelDownloaded ? "needs-setup" : "ready";
+  setMicState(voiceStatus === "ready" ? "idle" : voiceStatus);
+}
+
+function startSetup() {
+  if (!micBtn || settingUp) return;
+  settingUp = true;
+  setMicState("setting-up");
+  vscode.postMessage({ type: "setupVoice" });
+}
+
 if (micBtn) {
   let mediaStream = null;
   let audioCtx = null;
@@ -1278,13 +1321,6 @@ if (micBtn) {
   let scriptNode = null;
   let pcmChunks = [];
   let recording = false;
-
-  function setMicState(state) {
-    // state: "idle" | "recording" | "transcribing"
-    micBtn.classList.toggle("recording", state === "recording");
-    micBtn.classList.toggle("transcribing", state === "transcribing");
-    micBtn.disabled = state === "transcribing";
-  }
 
   function teardownCapture() {
     try { scriptNode && scriptNode.disconnect(); } catch { /* already disconnected */ }
@@ -1298,18 +1334,22 @@ if (micBtn) {
   }
 
   async function startRecording() {
-    if (recording || voiceTranscribing) return;
+    if (recording || voiceTranscribing || settingUp || voiceStatus !== "ready") return;
     try {
       mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch {
       // Covers both a user denial and the (currently likely, on an
       // unpatched build) case where getUserMedia is blocked entirely by the
-      // webview's permission policy — same message either way, since the
-      // fix ("check your OS privacy settings") is the only actionable one
-      // we can give from here; a stock-build failure is a LakshX-fork build
-      // gap, not something the user's privacy settings can fix, but we
-      // can't distinguish the two from a rejected promise alone.
-      addMsg("system", "Microphone access denied — check your OS privacy settings.");
+      // webview's permission policy — can't distinguish the two from a
+      // rejected promise alone, so the message names both possible causes
+      // instead of confidently pointing at OS settings when that might not
+      // be it at all.
+      addMsg(
+        "system",
+        "Couldn't access the microphone — either it was denied in your OS privacy settings, " +
+          "or this build doesn't have microphone access patched in yet. Check your OS privacy " +
+          "settings first; if it's still blocked after that, it's likely the latter.",
+      );
       return;
     }
     recording = true;
@@ -1352,8 +1392,12 @@ if (micBtn) {
     vscode.postMessage({ type: "transcribeAudio", pcm: merged.buffer });
   }
 
-  micBtn.addEventListener("mousedown", (e) => { e.preventDefault(); startRecording(); });
-  micBtn.addEventListener("touchstart", (e) => { e.preventDefault(); startRecording(); });
+  function onMicPress() {
+    if (voiceStatus !== "ready") { startSetup(); return; }
+    startRecording();
+  }
+  micBtn.addEventListener("mousedown", (e) => { e.preventDefault(); onMicPress(); });
+  micBtn.addEventListener("touchstart", (e) => { e.preventDefault(); onMicPress(); });
   micBtn.addEventListener("mouseup", stopRecording);
   micBtn.addEventListener("touchend", stopRecording);
   micBtn.addEventListener("mouseleave", () => { if (recording) stopRecording(); });
@@ -2200,6 +2244,7 @@ window.addEventListener("message", (e) => {
   const m = e.data;
   switch (m.type) {
     case "ready": {
+      applyVoiceCapability(m.voice);
       modelEl.innerHTML = "";
       const def = m.models.defaultModel;
       const opts = new Set([def]);
@@ -2357,6 +2402,12 @@ window.addEventListener("message", (e) => {
     // lands at the caret for the user to review/edit, never auto-submitted.
     case "transcribedText": insertTranscribedTextIntoComposer(m.text); break;
     case "transcribeAudioDone": endVoiceTranscribing(); break;
+    case "voiceSetupDone": {
+      settingUp = false;
+      if (m.ok) voiceStatus = "ready";
+      setMicState(voiceStatus === "ready" ? "idle" : voiceStatus);
+      break;
+    }
     case "fileResults":
       if (mentionActive && m.seq === mentionSeq) renderMentionResults(m.files);
       break;

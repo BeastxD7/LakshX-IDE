@@ -60,6 +60,28 @@ function isModelDownloaded(homedir = os.homedir()) {
   }
 }
 
+/**
+ * True if the `smart-whisper` native addon can be loaded at all — cheap,
+ * side-effect-free `require.resolve` check, deliberately never actually
+ * `require()`-ing it (which loads the compiled addon into the process).
+ * Lets the panel show "voice unavailable in this build" up front instead of
+ * only discovering a missing/unbuilt addon after a full record-and-stop
+ * round trip (see docs/research/14-voice-mode.md's UX-ordering note).
+ *
+ * Takes an injectable `resolve` (defaults to the real `require.resolve`)
+ * purely so tests can exercise both outcomes without depending on whether
+ * smart-whisper actually happens to be installed in the environment running
+ * the test.
+ */
+function isAddonAvailable(resolve = require.resolve) {
+  try {
+    resolve("smart-whisper");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ---------- transcription options ----------
 //
 // Seeded with code/tech terms to bias recognition — docs/research/14's
@@ -287,6 +309,28 @@ function joinSegments(result) {
  * @param {(pcm: Float32Array) => Promise<string>} deps.runTranscribe
  * @param {(msg: object) => void} deps.post
  */
+/**
+ * Shared by handleTranscribeAudio and handleSetupVoice: runs ensureModel()
+ * with throttled (every ~10%) progress messages, skipping the network call
+ * entirely if the model is already on disk. Posts nothing on the
+ * already-downloaded path — callers decide what "already ready" means for
+ * their own flow.
+ */
+async function downloadModelWithProgress({ ensureModel: doEnsureModel, post }) {
+  post({ type: "system", text: `Downloading speech-to-text model (${MODEL_NAME}, ~${MODEL_APPROX_MB}MB)... this happens once.` });
+  let lastPct = -1;
+  await doEnsureModel({
+    onProgress: ({ receivedMb, totalMb }) => {
+      const pct = totalMb ? Math.round((receivedMb / totalMb) * 100) : 0;
+      // Throttle to every 10% so this doesn't spam the transcript.
+      if (pct >= lastPct + 10) {
+        lastPct = pct;
+        post({ type: "system", text: `Downloading speech-to-text model... ${pct}% (${receivedMb}MB/${totalMb}MB)` });
+      }
+    },
+  });
+}
+
 async function handleTranscribeAudio({ pcm, isModelDownloaded: isDownloaded, ensureModel: doEnsureModel, runTranscribe, post }) {
   try {
     if (!pcm || pcm.length === 0) {
@@ -294,18 +338,7 @@ async function handleTranscribeAudio({ pcm, isModelDownloaded: isDownloaded, ens
       return;
     }
     if (!isDownloaded()) {
-      post({ type: "system", text: `Downloading speech-to-text model (${MODEL_NAME}, ~${MODEL_APPROX_MB}MB)... this happens once.` });
-      let lastPct = -1;
-      await doEnsureModel({
-        onProgress: ({ receivedMb, totalMb }) => {
-          const pct = totalMb ? Math.round((receivedMb / totalMb) * 100) : 0;
-          // Throttle to every 10% so this doesn't spam the transcript.
-          if (pct >= lastPct + 10) {
-            lastPct = pct;
-            post({ type: "system", text: `Downloading speech-to-text model... ${pct}% (${receivedMb}MB/${totalMb}MB)` });
-          }
-        },
-      });
+      await downloadModelWithProgress({ ensureModel: doEnsureModel, post });
       post({ type: "system", text: "Speech-to-text model ready." });
     }
     const text = await runTranscribe(pcm);
@@ -321,6 +354,44 @@ async function handleTranscribeAudio({ pcm, isModelDownloaded: isDownloaded, ens
   }
 }
 
+/**
+ * The "set up voice" flow: run BEFORE the mic is ever armed, from a click on
+ * a mic button that's showing its not-ready state. Never leaves the user
+ * having gone through record→stop only to be told afterwards that it can't
+ * work — see docs/research/14-voice-mode.md's UX-ordering note. Always
+ * terminates with exactly one `{ type: "voiceSetupDone", ok }`, mirroring
+ * handleTranscribeAudio's transcribeAudioDone contract, which is what
+ * panel.js uses to leave its "Setting up…" disabled state.
+ *
+ * @param {object} deps
+ * @param {() => boolean} deps.isModelDownloaded
+ * @param {(opts: {onProgress: (p:{receivedMb:number,totalMb:number})=>void}) => Promise<string>} deps.ensureModel
+ * @param {() => boolean} deps.isAddonAvailable
+ * @param {(msg: object) => void} deps.post
+ */
+async function handleSetupVoice({ isModelDownloaded: isDownloaded, ensureModel: doEnsureModel, isAddonAvailable: addonAvailable, post }) {
+  try {
+    if (!addonAvailable()) {
+      post({
+        type: "system",
+        text: "Voice input isn't available in this build — the smart-whisper speech engine didn't install correctly. This needs a rebuild, not a retry.",
+      });
+      post({ type: "voiceSetupDone", ok: false });
+      return;
+    }
+    if (isDownloaded()) {
+      post({ type: "voiceSetupDone", ok: true });
+      return;
+    }
+    await downloadModelWithProgress({ ensureModel: doEnsureModel, post });
+    post({ type: "system", text: "Speech-to-text model ready — hold the mic button to dictate." });
+    post({ type: "voiceSetupDone", ok: true });
+  } catch (err) {
+    post({ type: "system", text: `Voice setup failed: ${err?.message ?? err}` });
+    post({ type: "voiceSetupDone", ok: false });
+  }
+}
+
 module.exports = {
   MODEL_NAME,
   MODEL_FILENAME,
@@ -330,6 +401,7 @@ module.exports = {
   modelsDir,
   modelPath,
   isModelDownloaded,
+  isAddonAvailable,
   buildTranscribeOptions,
   concatFloat32,
   expectedSampleRate,
@@ -339,4 +411,5 @@ module.exports = {
   ensureModel,
   transcribe,
   handleTranscribeAudio,
+  handleSetupVoice,
 };
