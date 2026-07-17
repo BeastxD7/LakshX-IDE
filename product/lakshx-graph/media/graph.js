@@ -1042,8 +1042,22 @@ function createGraphApp(canvas, opts) {
     if (stops.length === 0 || tourIndex < 0) {
       if (tourTierEl) tourTierEl.textContent = "";
       if (tourCounterEl) tourCounterEl.textContent = "";
-      if (tourTitleEl) tourTitleEl.textContent = "No tour data yet.";
-      if (tourBlurbEl) tourBlurbEl.textContent = "";
+      if (tourTitleEl) {
+        // Distinguish "hasn't scanned yet" (depRaw not populated — switching
+        // to this tab already auto-triggers a scan, see __needsScan below;
+        // this is just the brief in-flight window) from "scanned and there's
+        // genuinely nothing to walk through" (e.g. no scannable source files
+        // in this workspace) — a bare "No tour data yet." explained neither,
+        // a real reported point of confusion ("I don't know how to use it").
+        tourTitleEl.textContent = depRaw
+          ? "Nothing to walk through — this workspace has no scannable source files for a Guided Tour."
+          : "Scanning your workspace for a Guided Tour (same scan as Dependencies) — one moment…";
+      }
+      if (tourBlurbEl) {
+        tourBlurbEl.textContent = depRaw
+          ? ""
+          : "A Guided Tour orders every file/package by role — entry points first, shared utilities and persistence last — with a one-line blurb per stop, so you can walk an unfamiliar codebase top-down instead of guessing where to start.";
+      }
       if (tourPrevEl) tourPrevEl.disabled = true;
       if (tourNextEl) tourNextEl.disabled = true;
       if (tourJumpEl) tourJumpEl.disabled = true;

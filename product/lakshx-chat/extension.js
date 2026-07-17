@@ -1722,6 +1722,16 @@ class AgentViewProvider {
       }
       case "setModel":
         this.currentModel = m.model;
+        // Also persists as the new default (providers.json), not just this
+        // session's in-memory model — previously this only updated
+        // this.currentModel, so picking a model from the composer dropdown
+        // silently diverged from Settings' "default model": reopening
+        // Settings kept showing whatever was last saved there, not what the
+        // composer was actually using. One "current model", one place it
+        // lives, same as Settings' own "Use as default model" checkbox.
+        if (typeof m.model === "string" && m.model.includes("/")) {
+          saveProviderState({}, m.model);
+        }
         if (this.acp && this.sessionId) {
           await this.acp.request("lakshx/set_model", { sessionId: this.sessionId, model: m.model });
         }
