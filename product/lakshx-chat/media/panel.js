@@ -2132,10 +2132,21 @@ function renderSettings() {
     </div>
     <label class="check"><input type="checkbox" id="makeDefault" checked> Use as default model</label>
     <div id="provStatus" class="muted"></div>
+    <div class="field">
+      <label>Explain language</label>
+      <select id="explainLanguageSelect" class="big">${Object.entries(settingsState.explainLanguages ?? { english: "English (default)" })
+        .map(([id, label]) => `<option value="${id}" ${id === (settingsState.explainLanguage || "english") ? "selected" : ""}>${escapeHtml(label)}</option>`)
+        .join("")}</select>
+      <div class="muted">Errors, plans, and diffs get explained in this code-mixed register — code, commands, and file paths always stay in English.</div>
+    </div>
   `;
   document.getElementById("providerSelect").addEventListener("change", renderSettings);
   document.getElementById("modelSelect").addEventListener("change", (e) => {
     document.getElementById("customModel").hidden = e.target.value !== "__custom__";
+  });
+  document.getElementById("explainLanguageSelect").addEventListener("change", (e) => {
+    settingsState.explainLanguage = e.target.value; // survives the next renderSettings() re-render (e.g. on provider change)
+    vscode.postMessage({ type: "setExplainLanguage", value: e.target.value });
   });
   if (isSet && !liveModels[providerId]) {
     document.getElementById("provStatus").textContent = "checking key, fetching models…";

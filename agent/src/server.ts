@@ -10,7 +10,7 @@ import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import { maybeCompact, readFileAtCommit, undoFile, undoPaths } from "./checkpoint.js";
 import { availableProviders, loadConfig } from "./config.js";
-import { runPrompt, toolTitle, type AgentMode, type AgentSession } from "./loop.js";
+import { normalizeExplainLanguage, runPrompt, toolTitle, type AgentMode, type AgentSession } from "./loop.js";
 import { toolResultText } from "./providers/types.js";
 import { probeProvider } from "./providers/validate.js";
 import { loadSessionFile, pruneSessions, saveSessionSoon, type PromptCheckpoint, type PromptMarker } from "./store.js";
@@ -182,6 +182,19 @@ const agentApp = acp
     async (ctx) => {
       const s = sessions.get(ctx.params.sessionId);
       if (s) s.model = ctx.params.model;
+      return {};
+    },
+  )
+  // LakshX extension: set the regional-language/Hinglish explain toggle for a
+  // session — same shape as `lakshx/set_model` just above (same wire, no new
+  // transport); `normalizeExplainLanguage` fails safe to "english" for any
+  // unrecognized value instead of trusting the wire.
+  .onRequest(
+    "lakshx/set_explain_language",
+    (v: unknown) => v as { sessionId: string; explainLanguage: string },
+    async (ctx) => {
+      const s = sessions.get(ctx.params.sessionId);
+      if (s) s.explainLanguage = normalizeExplainLanguage(ctx.params.explainLanguage);
       return {};
     },
   )

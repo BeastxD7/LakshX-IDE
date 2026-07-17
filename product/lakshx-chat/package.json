@@ -151,6 +151,18 @@
           "type": "boolean",
           "default": true,
           "description": "Show the mic (push-to-talk dictation) button in the chat composer. The button renders regardless of this fork's Electron build — on a stock/unpatched build it fails gracefully with a clear message instead of transcribing, since microphone access in the webview requires LakshX's own patched Electron (docs/research/14-voice-mode.md)."
+        },
+        "lakshx.explainLanguage": {
+          "type": "string",
+          "enum": ["english", "hinglish", "tanglish", "benglish"],
+          "enumDescriptions": [
+            "Plain English (default).",
+            "Hindi-English code-mixed, the way Indian developers actually talk.",
+            "Tamil-English code-mixed.",
+            "Bengali-English code-mixed."
+          ],
+          "default": "english",
+          "description": "Explain errors, plans, diffs, and general responses in this code-mixed register instead of plain English. Code, terminal commands, file paths, and identifiers are never translated or mixed — only the agent's explanatory prose shifts register. Off (plain English) by default."
         }
       }
     }

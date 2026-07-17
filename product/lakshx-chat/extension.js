@@ -8,6 +8,7 @@ const path = require("path");
 const { CHANGELOG } = require("./changelog.js");
 const diagnostics = require("./diagnostics.js");
 const { discoverCommands, expandCommandBody } = require("./commands.js");
+const { EXPLAIN_LANGUAGES, normalizeExplainLanguage } = require("./explain-language.js");
 const { AcpClient } = require("./acp-client.js");
 const { buildCrashContext } = require("./crash-context.js");
 const voice = require("./voice.js");
@@ -816,6 +817,7 @@ class AgentViewProvider {
           this.view?.webview.postMessage({ type: "modeChanged", mode: this.mode, auto: false });
           this.remote?.broadcast({ type: "modeChanged", mode: this.mode, auto: false });
         }
+        await this.pushExplainLanguage();
         return;
       } catch (err) {
         this.log.appendLine(`session/load failed for ${resumeSessionId}, starting fresh: ${err.message}`);
@@ -836,6 +838,27 @@ class AgentViewProvider {
       this.mode = fresh;
       this.view?.webview.postMessage({ type: "modeChanged", mode: fresh, auto: false });
       this.remote?.broadcast({ type: "modeChanged", mode: fresh, auto: false });
+    }
+    await this.pushExplainLanguage();
+  }
+
+  /**
+   * Push the current `lakshx.explainLanguage` setting to the live agent
+   * session over the same `lakshx/set_*` wire `setModel` uses
+   * (`lakshx/set_explain_language`, server.ts). Not persisted server-side
+   * (a fresh/loaded session always starts unset = "english" — server.ts's
+   * `session/new`/`session/load` don't know about this setting), so this
+   * must re-run on every `session/new`/`session/load`, same reasoning as why
+   * `loadOrNewSession` re-syncs `mode` above instead of trusting a stale
+   * client-side value.
+   */
+  async pushExplainLanguage() {
+    if (!this.acp || !this.sessionId) return;
+    const explainLanguage = normalizeExplainLanguage(vscode.workspace.getConfiguration("lakshx").get("explainLanguage", "english"));
+    try {
+      await this.acp.request("lakshx/set_explain_language", { sessionId: this.sessionId, explainLanguage });
+    } catch (err) {
+      this.log.appendLine(`set_explain_language failed: ${err.message}`);
     }
   }
 
@@ -1817,8 +1840,21 @@ class AgentViewProvider {
         this.newChat();
         break;
       case "openSettings":
-        this.post({ type: "showSettings", providers: readProviderState() });
+        this.post({
+          type: "showSettings",
+          providers: {
+            ...readProviderState(),
+            explainLanguages: EXPLAIN_LANGUAGES,
+            explainLanguage: normalizeExplainLanguage(vscode.workspace.getConfiguration("lakshx").get("explainLanguage", "english")),
+          },
+        });
         break;
+      case "setExplainLanguage": {
+        const explainLanguage = normalizeExplainLanguage(m.value);
+        await vscode.workspace.getConfiguration("lakshx").update("explainLanguage", explainLanguage, vscode.ConfigurationTarget.Global);
+        await this.pushExplainLanguage();
+        break;
+      }
       case "saveProviders": {
         saveProviderState(m.keys, m.defaultModel);
         if (!this.acp) await this.ensureAgent();
