@@ -1,4 +1,4 @@
-export type ChangelogCategory = "Agent" | "Databases" | "Docs" | "Build/Distribution" | "UI";
+export type ChangelogCategory = "Agent" | "Security" | "Databases" | "Docs" | "Build/Distribution" | "UI";
 
 export interface ChangelogEntry {
   /** Committer date, YYYY-MM-DD (matches `git log --date=short`). */
@@ -13,7 +13,7 @@ export interface ChangelogEntry {
  * Sourced directly from this repo's real commit history — captured with
  * `git log --format="%ad|%h|%s" --date=short` across the whole tree, every
  * commit from the initial commit through the latest at the time this page
- * was written (134 commits, 2026-07-14 through 2026-07-17). Every entry
+ * was written (164 commits, 2026-07-14 through 2026-07-17). Every entry
  * below traces to exactly one commit hash; nothing here is invented.
  *
  * Subjects are lightly re-cased for readability (the repo's own scope
@@ -160,8 +160,56 @@ export const CHANGELOG_ENTRIES: ChangelogEntry[] = [
   { date: "2026-07-17", hash: "d041b75", category: "UI", text: "Landing page: add /docs — themed documentation site" },
   { date: "2026-07-17", hash: "f1dfac8", category: "Docs", text: "Docs: Document architecture evolution + the complete multi-agent picture" },
   { date: "2026-07-17", hash: "fe5d880", category: "Docs", text: "Add IDE feature roadmap research (beyond the agent layer)" },
-  { date: "2026-07-17", hash: "169890d", category: "Agent", text: "Stage 2a: background subagents (non-blocking dispatch + steering + tray)" },
+  {
+    date: "2026-07-17",
+    hash: "169890d",
+    category: "Agent",
+    text:
+      "Stage 2a: background subagents. dispatch_subtasks gains a background: true flag so a dispatched subagent no longer blocks the parent turn — the model keeps working while children run under their own independent AbortControllers. Three new tools (check_tasks, send_to_task, wait_for_tasks) let the model poll, steer, or explicitly wait on them, with a tray UI surfacing live progress and completions queued into the next turn behind an explicit not-user-input frame.",
+  },
   { date: "2026-07-17", hash: "a2f978f", category: "Docs", text: "Docs: Mark background subagents as shipped in architecture.md §12.2" },
+  { date: "2026-07-17", hash: "97c5cbf", category: "UI", text: "Add a custom LakshX Welcome screen; replace the remaining stock Help-menu items" },
+  { date: "2026-07-17", hash: "ce318fd", category: "UI", text: "Roadmap #4: Tab / next-edit prediction (product/lakshx-tab)" },
+  { date: "2026-07-17", hash: "eef2f76", category: "UI", text: "Roadmap #2: Default-on inline test results + coverage gutter (product/lakshx-testing)" },
+  { date: "2026-07-17", hash: "228fb3e", category: "UI", text: "Roadmap #5: Universal command bar v1 (product/lakshx-commandbar)" },
+  { date: "2026-07-17", hash: "2d84a11", category: "UI", text: "Roadmap #3: Terminal command blocks (product/lakshx-terminal)" },
+  { date: "2026-07-17", hash: "cb8f3d9", category: "UI", text: "Roadmap #10: Curated/vetted extension panel (product/lakshx-extensions)" },
+  { date: "2026-07-17", hash: "0926f26", category: "Security", text: "Roadmap #1: Inline dependency-vulnerability hints (lakshx-graph), backed by a live OSV.dev lookup" },
+  { date: "2026-07-17", hash: "572ab95", category: "UI", text: "Landing page: Add /changelog, sourced from real git history" },
+  { date: "2026-07-17", hash: "78ed7d2", category: "UI", text: "Roadmap #9: Structural search & replace (product/lakshx-structural-search)" },
+  { date: "2026-07-17", hash: "f3312e7", category: "UI", text: "Roadmap #8: AI-powered crash explanation" },
+  { date: "2026-07-17", hash: "bc8ba07", category: "UI", text: "Roadmap #7: Semantic/embedding codebase search (product/lakshx-search)" },
+  { date: "2026-07-17", hash: "f7ade8b", category: "Build/Distribution", text: "Wire up 7 extensions built today that were never registered for bundling" },
+  { date: "2026-07-17", hash: "dd61f18", category: "Agent", text: "Roadmap #6: AI-assisted merge conflict resolution" },
+  { date: "2026-07-17", hash: "aa00ef7", category: "Security", text: "LakshX Extensions: Allow-list check before installExtension (defense-in-depth)" },
+  { date: "2026-07-17", hash: "67c28ce", category: "Docs", text: "Add round-2 IDE feature roadmap research" },
+  { date: "2026-07-17", hash: "003aa6c", category: "Docs", text: "Docs: Fold external validation into Royal Mode 2.0 design (round-2 research)" },
+  { date: "2026-07-17", hash: "e93550d", category: "Docs", text: "Add cloud/SaaS pivot research (accounts, billing, auto-update, India market)" },
+  { date: "2026-07-17", hash: "847a3f0", category: "Security", text: "Security fix: Escape ALL boundary tags in background-task notifications" },
+  { date: "2026-07-17", hash: "fd0030c", category: "Databases", text: "Db_query: Add MongoDB support (was deferred in v1)" },
+  { date: "2026-07-17", hash: "c26ba70", category: "Agent", text: "Rebuild agent bundle (server.cjs) — was stale since before this session's work" },
+  { date: "2026-07-17", hash: "560f24b", category: "UI", text: "Voice mode: Patches + STT pipeline code (live mic verification still blocked on disk)" },
+  { date: "2026-07-17", hash: "66c790c", category: "Security", text: "Security fix: Escape untrusted values in panel.js innerHTML templates" },
+  {
+    date: "2026-07-17",
+    hash: "3d43967",
+    category: "Agent",
+    text:
+      "Royal Mode 2.0 Stage A: a new set_verification_spec / declare_done tool pair — the model records a content-hashed VerificationSpec (real shell checks + how to judge them) up front, and declare_done actually re-runs those checks server-side rather than trusting the model's own claim of completion, refusing to pass with no spec set or in read-only review mode. A session-scoped stand-in for Stage B's full PLAN-phase gating (below), covered by a dedicated declare-done test suite.",
+  },
+  { date: "2026-07-17", hash: "6c5ff1b", category: "Security", text: "SAST-lite pattern scanning: SQLi/XSS-class shape detection" },
+  { date: "2026-07-17", hash: "7313192", category: "Security", text: "Offline pre-commit secret scanning (product/lakshx-secrets)" },
+  {
+    date: "2026-07-17",
+    hash: "597761d",
+    category: "Agent",
+    text:
+      "Royal Mode 2.0 Stage B: the complete phase-machine orchestrator — INTAKE → RECON → PLAN → [checkpoint] → EXECUTE → VERIFY, with FIX (up to 2 retries) and a checkpoint-based REWIND back to the PLAN baseline (capped at 2 re-entries) on failure — replacing royal mode's old flat loop with the floor simply turned off. Gated to top-level royal sessions only, so a subagent inheriting royal mode still runs the flat loop rather than recursively phase-managing itself; verified end-to-end by 5 dedicated tests including a full non-trivial run through every phase and a REWIND proof checked against a real git diff, not a status string.",
+  },
+  { date: "2026-07-17", hash: "19ef621", category: "Docs", text: "Docs: Mark Royal Mode 2.0 phase machine as shipped in architecture.md §12.3" },
+  { date: "2026-07-17", hash: "b51823e", category: "Agent", text: "Regional-language / Hinglish explain toggle" },
+  { date: "2026-07-17", hash: "af0c9d7", category: "UI", text: "Codebase Guided Tour mode (product/lakshx-graph)" },
+  { date: "2026-07-17", hash: "7adbdcf", category: "UI", text: "PR walkthrough auto-generator (/walkthrough slash command)" },
 ];
 
 export const REPO_URL = "https://github.com/BeastxD7/koder";
@@ -179,5 +227,5 @@ export const DATE_BLURBS: Record<string, string> = {
   "2026-07-16":
     "This cycle's feature sprint — multi-engine database tools, the interactive browser tool, native distribution builds.",
   "2026-07-17":
-    "Docs, roadmap research, and the start of Royal Mode 2.0's background subagents.",
+    "The biggest single day yet: background subagents and the full Royal Mode 2.0 phase machine, a round of real security work (secret scanning, SAST-lite, escaping fixes, dependency-vuln hints), the first ten items of the IDE feature roadmap (tab prediction, testing gutter, command bar, terminal blocks, structural search, semantic search, crash explanation, merge-conflict resolution, curated extensions, guided tour), voice mode, Hinglish explain, a PR walkthrough generator, this changelog itself, and the cloud/SaaS pivot research.",
 };

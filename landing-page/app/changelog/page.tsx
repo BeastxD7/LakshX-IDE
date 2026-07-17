@@ -5,7 +5,7 @@ import CategoryBadge from "./_components/CategoryBadge";
 
 // Fixed display order for category subsections within a date group — an
 // arbitrary but stable order (roughly: core product first, infra last).
-const CATEGORY_ORDER: ChangelogCategory[] = ["Agent", "Databases", "UI", "Build/Distribution", "Docs"];
+const CATEGORY_ORDER: ChangelogCategory[] = ["Agent", "Security", "Databases", "UI", "Build/Distribution", "Docs"];
 
 function formatDate(dateStr: string): string {
   // Parse as UTC midnight so the displayed date never shifts a day in

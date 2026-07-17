@@ -3,13 +3,17 @@ import type { ChangelogCategory } from "../_data/entries";
 /**
  * Small colored pill labeling each entry's rough area, in the same glass-chip
  * language as Callout's variant colors (app/docs/_components/Callout.tsx) —
- * violet for agent/runtime work, green for databases, sky for docs/research,
- * amber for build & distribution, neutral white for everything else (UI,
- * landing page, rebrand). Deliberately just 5 buckets per the brief — this
- * is meant to be scannable, not a taxonomy.
+ * violet for agent/runtime work, rose for security work, green for
+ * databases, sky for docs/research, amber for build & distribution, neutral
+ * white for everything else (UI, landing page, rebrand). 6 buckets — still
+ * meant to be scannable, not a taxonomy. Security was split out from the
+ * other buckets once real audits + fixes (secret scanning, SAST-lite,
+ * dependency-vuln hints, escaping fixes) started shipping — lumping those
+ * into UI/Agent buried the one category readers most want to scan for.
  */
 const STYLES: Record<ChangelogCategory, { label: string; className: string }> = {
   Agent: { label: "Agent", className: "border-lakshx-violet/40 bg-lakshx-violet/10 text-lakshx-violet-active" },
+  Security: { label: "Security", className: "border-[#f87171]/30 bg-[#f87171]/10 text-[#f87171]" },
   Databases: { label: "Databases", className: "border-[#8ee6a8]/30 bg-[#8ee6a8]/10 text-[#8ee6a8]" },
   Docs: { label: "Docs", className: "border-[#7dd3fc]/30 bg-[#7dd3fc]/10 text-[#7dd3fc]" },
   "Build/Distribution": { label: "Build", className: "border-[#f0b866]/30 bg-[#f0b866]/10 text-[#f0b866]" },
