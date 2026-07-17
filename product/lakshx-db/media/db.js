@@ -57,6 +57,7 @@
     rows: [], // last-rendered page's rows (array of {kind,text} cell objects)
     sortCol: -1,
     sortDir: 1,
+    aiQueriesEnabled: false,
   };
 
   document.getElementById("refresh").addEventListener("click", () => {
@@ -167,7 +168,9 @@
     state.rows = msg.rows || [];
     state.sortCol = -1;
     state.sortDir = 1;
-    el.dataBanner.hidden = true;
+    // dataBanner's visibility is owned entirely by updateDataBanner() (driven
+    // by the AI-queries toggle state), not by whether a table is loaded —
+    // see renderAiQueries below.
 
     if (el.tableSelect.value !== msg.table) el.tableSelect.value = msg.table;
 
@@ -284,12 +287,37 @@
     updatePager();
   }
 
+  // This toggle has no query box of its own anywhere in this panel — it
+  // gates whether the AI agent's separate db_query TOOL (used from the
+  // LakshX Agent chat panel, not here) is allowed to run against this
+  // connection. Flipping it on with no visible next step was a real,
+  // reported point of confusion ("I don't see any input to type these
+  // natural language queries... where can I use it?"), so updateDataBanner
+  // makes that explicit right where the toggle lives, persistently (not a
+  // one-time toast) — independent of whatever table/page is currently
+  // loaded, per renderRows' comment above.
+  function updateDataBanner() {
+    if (!el.dataBanner) return;
+    if (!state.aiQueriesEnabled) {
+      el.dataBanner.hidden = true;
+      return;
+    }
+    el.dataBanner.hidden = false;
+    el.dataBanner.textContent =
+      "AI queries are on — this doesn't add a query box here. Ask the LakshX Agent " +
+      "(the chat panel) in plain language instead, e.g. “show me all users” or " +
+      "“how many orders were placed today” — it runs a read-only query against " +
+      "this connection and shows you the answer there.";
+  }
+
   function renderAiQueries(enabled) {
+    state.aiQueriesEnabled = !!enabled;
     el.aiQueries.classList.toggle("on", !!enabled);
     el.aiQueries.textContent = enabled ? "AI queries: On" : "Allow AI queries";
     el.aiQueries.title = enabled
       ? "The AI assistant may run read-only queries against this connection. Click to disable."
       : "Let the AI assistant run read-only queries against this connection";
+    updateDataBanner();
   }
 
   function showOnly(name) {

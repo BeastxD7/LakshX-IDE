@@ -1,9 +1,14 @@
 :root {
-  /* Same rationale as koder-chat/media/panel.css: this panel is always dark,
+  /* Same rationale as lakshx-chat/media/panel.css: this panel is always dark,
      independent of OS theme, so native form controls don't fall back to a
-     light Chromium default that ignores our page CSS. */
+     light Chromium default that ignores our page CSS. --bg is hardcoded, not
+     var(--vscode-sideBar-background, #0e1116) — that fallback chain followed
+     the user's OVERALL workbench theme first (VS Code always defines that
+     variable, for every theme, so the hardcoded fallback never actually
+     applied), directly undermining "always dark, never OS-dependent" on a
+     machine where the workbench itself falls back to a light theme. */
   color-scheme: dark;
-  --bg: var(--vscode-sideBar-background, #0e1116);
+  --bg: #0e1116;
   --fg: #c8cede;
   --muted: #8a93a8;
   --faint: #5c6577;

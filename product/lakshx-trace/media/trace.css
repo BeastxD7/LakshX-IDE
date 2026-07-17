@@ -1,9 +1,14 @@
 :root {
   /* Same fixed-dark rationale as lakshx-db/media/db.css and
      lakshx-graph/media/graph.css — this panel is always dark, independent
-     of the OS/editor theme. */
+     of the OS/editor theme. --bg is hardcoded, not
+     var(--vscode-sideBar-background, #0e1116) — that fallback chain followed
+     the user's OVERALL workbench theme first (VS Code always defines that
+     variable, for every theme, so the hardcoded fallback never actually
+     applied), undermining "always dark" on a machine where the workbench
+     itself falls back to a light theme. */
   color-scheme: dark;
-  --bg: var(--vscode-sideBar-background, #0e1116);
+  --bg: #0e1116;
   --fg: #c8cede;
   --muted: #8a93a8;
   --faint: #5c6577;

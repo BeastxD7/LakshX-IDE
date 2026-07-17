@@ -10,9 +10,23 @@
      open option list ignored the CSS entirely and used Chromium's light
      default. Same root cause class as the workbench falling back to
      unbranded light theme; different subsystem (this is a webview's own
-     HTML, not VS Code's internal color-theme engine). */
+     HTML, not VS Code's internal color-theme engine).
+
+     --bg previously fell back through var(--vscode-sideBar-background, #0e1116)
+     — meaning it followed the user's OVERALL workbench color theme first,
+     the hardcoded dark fallback only if that variable was literally undefined
+     (which it never is; VS Code injects it for every theme, light or dark).
+     That directly contradicted this comment's own "always dark, never
+     OS-dependent" intent: on a machine where the workbench itself falls back
+     to a light theme (window.autoDetectColorScheme matching a light OS theme,
+     or the intended dark default simply not applying — a real, hit-in-the-
+     wild failure mode on Windows), every translucent rgba(0,0,0,0.25) control
+     background (see #model, #modeSelect, .field select.big below) composited
+     against that light surface instead of a dark one, reading as washed-out
+     light with light-gray text on top. Hardcoded now — this panel owns its
+     own colors unconditionally, matching the stated design. */
   color-scheme: dark;
-  --bg: var(--vscode-sideBar-background, #0e1116);
+  --bg: #0e1116;
   --fg: #c8cede;
   --muted: #8a93a8;
   --faint: #5c6577;
@@ -34,7 +48,10 @@ html, body {
   height: 100%;
   padding: 0;
   margin: 0;
-  background: transparent;
+  /* Opaque, not transparent — see :root's --bg comment. A transparent page
+     background lets whatever the surrounding workbench theme happens to be
+     bleed through underneath every translucent control on this page. */
+  background: var(--bg);
   color: var(--fg);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-size: 13px;
