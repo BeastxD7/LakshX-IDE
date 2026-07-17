@@ -54,11 +54,11 @@ function createGraphApp(canvas, opts) {
   // ---- dependency-graph mode (parallel to the call-graph state above) ----
   // Kept in its own maps so call-mode's nodesById/edges/parentOf semantics are
   // never touched. `mode` gates which layout/render/hit-test path runs.
-  let mode = "call"; // "call" | "dep"
-  let depRaw = null; // { nodes, edges, cycles, stats } straight from the host
+  let mode = "call"; // "call" | "dep" | "tour"
+  let depRaw = null; // { nodes, edges, cycles, stats, tour } straight from the host
   let depNodes = new Map(); // id -> { ...node, x, y, vx, vy, r } (view set, post-filter)
   let depEdges = []; // { from, to, kind } (view set)
-  let depFocus = null; // focused node id (highlight neighborhood)
+  let depFocus = null; // focused node id (highlight neighborhood) — click-to-focus, dep mode
   let depFilter = ""; // search text (lowercased)
   let depHideExternal = false;
   let depCollapseExternal = false;
@@ -66,6 +66,24 @@ function createGraphApp(canvas, opts) {
   const tooltipEl = opts.tooltipEl || null;
   const statsEl = opts.statsEl || null;
   const hintEl = opts.hintEl || null;
+
+  // ---- Guided Tour mode ----
+  // Reuses depNodes/depEdges/renderDep() verbatim for the canvas — the tour
+  // just drives WHICH node(s) are highlighted (tourFocusIds, a superset of
+  // depFocus that can span every member of a collapsed cyclic cluster) and
+  // renders a step panel alongside it. No second rendering system.
+  let depTour = null; // { stops, tiers } from lib/tour.js, via the host
+  let tourIndex = -1; // index into depTour.stops
+  let tourFocusIds = null; // Set<nodeId> — the current stop's member(s)
+  let pendingTourJumpPath = null; // a jumpToPath request that arrived before tour data did
+  const tourPanelEl = opts.tourPanelEl || null;
+  const tourTierEl = opts.tourTierEl || null;
+  const tourCounterEl = opts.tourCounterEl || null;
+  const tourTitleEl = opts.tourTitleEl || null;
+  const tourBlurbEl = opts.tourBlurbEl || null;
+  const tourPrevEl = opts.tourPrevEl || null;
+  const tourNextEl = opts.tourNextEl || null;
+  const tourJumpEl = opts.tourJumpEl || null;
 
   let scale = 1;
   let panX = 0;
@@ -84,14 +102,14 @@ function createGraphApp(canvas, opts) {
   }
 
   // Single dispatch point for the interaction handlers so call-mode and
-  // dep-mode never cross wires.
+  // dep-mode never cross wires. Tour mode reuses the exact dep-mode renderer.
   function draw() {
-    if (mode === "dep") renderDep();
+    if (mode === "dep" || mode === "tour") renderDep();
     else render();
   }
 
   function resetView() {
-    if (mode === "dep") {
+    if (mode === "dep" || mode === "tour") {
       fitDep();
       return;
     }
@@ -413,6 +431,10 @@ function createGraphApp(canvas, opts) {
       handleDepClick(world);
       return;
     }
+    if (mode === "tour") {
+      handleTourClick(world);
+      return;
+    }
     const hit = hitTest(world.x, world.y);
     if (!hit) return;
     if (hit.kind === "more") {
@@ -428,9 +450,9 @@ function createGraphApp(canvas, opts) {
     }
   }
 
-  // hover → tooltip (dep-mode only; call-mode has no tooltip element)
+  // hover → tooltip (dep/tour modes only; call-mode has no tooltip element)
   canvas.addEventListener("mousemove", (ev) => {
-    if (mode !== "dep" || dragging || !tooltipEl) return;
+    if ((mode !== "dep" && mode !== "tour") || dragging || !tooltipEl) return;
     const rect = canvas.getBoundingClientRect();
     const world = screenToWorld(ev.clientX - rect.left, ev.clientY - rect.top);
     const hit = hitTestDep(world.x, world.y);
@@ -650,9 +672,12 @@ function createGraphApp(canvas, opts) {
     renderDep();
   }
 
-  // Which node ids are "active" (fully lit): the search match set if searching,
-  // else the focused node + its direct neighbors, else everything.
+  // Which node ids are "active" (fully lit): in tour mode, the current stop's
+  // member(s) — a cyclic cluster stop lights every one of its files, not just
+  // one. Otherwise: the search match set if searching, else the focused node
+  // + its direct neighbors, else everything.
   function depActiveSet() {
+    if (mode === "tour") return tourFocusIds; // null until a stop is loaded — null means "everything active"
     if (depFilter) {
       const s = new Set();
       for (const nd of depNodes.values()) {
@@ -727,7 +752,7 @@ function createGraphApp(canvas, opts) {
       ctx.arc(nd.x, nd.y, nd.r, 0, Math.PI * 2);
       ctx.fillStyle = fill;
       ctx.fill();
-      if (nd.id === depFocus) {
+      if (nd.id === depFocus || (mode === "tour" && tourFocusIds && tourFocusIds.has(nd.id))) {
         ctx.lineWidth = 2.5;
         ctx.strokeStyle = "#fff";
         ctx.stroke();
@@ -787,6 +812,18 @@ function createGraphApp(canvas, opts) {
       depFocus = hit.id;
     }
     renderDep();
+  }
+
+  // Clicking a node while touring jumps the tour to whichever stop that node
+  // belongs to (a natural way to "ask the tour about this node" without a
+  // separate lookup UI) — it never clears the tour position the way an
+  // empty-space click does in plain dep-mode.
+  function handleTourClick(world) {
+    if (!depTour) return;
+    const hit = hitTestDep(world.x, world.y);
+    if (!hit) return;
+    const idx = depTour.stops.findIndex((s) => s.members.includes(hit.id));
+    if (idx >= 0) tourGoTo(idx);
   }
 
   function updateDepStats() {
@@ -876,7 +913,10 @@ function createGraphApp(canvas, opts) {
 
   // ---------- dep-mode public methods ----------
   function loadDependencyGraph(payload) {
-    mode = "dep";
+    // Preserve tour mode if that's how we got here (e.g. a scan triggered by
+    // switching to the Guided Tour tab, or by "Explain this file"); otherwise
+    // this is the normal Dependencies-tab scan entry.
+    mode = mode === "tour" ? "tour" : "dep";
     depRaw = payload || { nodes: [], edges: [], cycles: [], stats: {} };
     rawNodeById = new Map((depRaw.nodes || []).map((n) => [n.id, n]));
     depFocus = null;
@@ -885,17 +925,25 @@ function createGraphApp(canvas, opts) {
     simulateDep();
     if (hintEl) hintEl.hidden = depNodes.size > 0;
     updateDepStats();
+    // The host computes the tour alongside the dependency scan (same data,
+    // just reordered/tiered — see lib/tour.js) and ships it in the same
+    // payload, so one scan feeds all three modes.
+    loadTour(payload && payload.tour);
     fitDep();
   }
 
   function setMode(next) {
-    if (next !== "call" && next !== "dep") return;
+    if (next !== "call" && next !== "dep" && next !== "tour") return;
     mode = next;
-    if (mode === "dep") {
+    if (mode === "dep" || mode === "tour") {
       if (hintEl) hintEl.hidden = !!(depRaw && depNodes.size > 0);
       updateDepStats();
       if (depRaw && depNodes.size > 0) fitDep();
       else { const rect = canvas.getBoundingClientRect(); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, rect.width, rect.height); }
+      if (mode === "tour") {
+        renderTourPanel();
+        applyTourFocus();
+      }
     } else {
       if (hintEl) hintEl.hidden = true;
       hideTooltip();
@@ -910,6 +958,98 @@ function createGraphApp(canvas, opts) {
   }
 
   function getMode() { return mode; }
+
+  // ---------- Guided Tour public methods ----------
+  // `tour` is { stops, tiers } from lib/tour.js, arriving as part of the same
+  // depInit payload as the dependency scan (see loadDependencyGraph above).
+  function loadTour(tour) {
+    depTour = tour && tour.stops ? tour : { stops: [], tiers: [] };
+    tourIndex = depTour.stops.length ? 0 : -1;
+    if (pendingTourJumpPath) {
+      const path = pendingTourJumpPath;
+      pendingTourJumpPath = null;
+      const idx = depTour.stops.findIndex((s) => s.members.includes(path) || s.path === path);
+      if (idx >= 0) tourIndex = idx;
+    }
+    renderTourPanel();
+    if (mode === "tour") applyTourFocus();
+  }
+
+  function tourGoTo(i) {
+    if (!depTour || i < 0 || i >= depTour.stops.length) return;
+    tourIndex = i;
+    renderTourPanel();
+    applyTourFocus();
+  }
+  function tourNext() { tourGoTo(tourIndex + 1); }
+  function tourPrev() { tourGoTo(tourIndex - 1); }
+
+  /** Open the current stop's representative file in the editor (host round-trip). */
+  function tourJumpToFile() {
+    if (!depTour || tourIndex < 0) return;
+    const stop = depTour.stops[tourIndex];
+    if (stop) transport.openPath(stop.path);
+  }
+
+  /** Jump the tour straight to whichever stop a given file path belongs to —
+   * used by "Explain this file" -> "Show in Guided Tour". If tour data
+   * hasn't arrived yet, the request is buffered (see loadTour above). */
+  function tourJumpToPath(filePath) {
+    if (!depTour || depTour.stops.length === 0) {
+      pendingTourJumpPath = filePath;
+      return;
+    }
+    const idx = depTour.stops.findIndex((s) => s.members.includes(filePath) || s.path === filePath);
+    if (idx >= 0) tourGoTo(idx);
+  }
+
+  /** Highlight the current stop's member node(s) and center the view on them
+   * (reuses fitDep's canvas, just pans instead of re-fitting zoom so the
+   * user keeps their bearings stop-to-stop). */
+  function applyTourFocus() {
+    if (mode !== "tour" || !depTour || tourIndex < 0 || !depTour.stops[tourIndex]) {
+      tourFocusIds = null;
+      renderDep();
+      return;
+    }
+    const stop = depTour.stops[tourIndex];
+    tourFocusIds = new Set(stop.members);
+    const pts = stop.members.map((id) => depNodes.get(id)).filter(Boolean);
+    if (pts.length) {
+      const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+      const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+      const rect = canvas.getBoundingClientRect();
+      panX = rect.width / 2 - cx * scale;
+      panY = rect.height / 2 - cy * scale;
+    }
+    renderDep();
+  }
+
+  /** Sync the step-panel DOM (tier/counter/title/blurb/nav button states)
+   * to the current stop. All text is accurate metric-derived data from
+   * lib/tour.js — nothing fabricated here. */
+  function renderTourPanel() {
+    if (!tourTierEl && !tourCounterEl && !tourTitleEl && !tourBlurbEl) return; // no tour DOM wired
+    const stops = (depTour && depTour.stops) || [];
+    if (stops.length === 0 || tourIndex < 0) {
+      if (tourTierEl) tourTierEl.textContent = "";
+      if (tourCounterEl) tourCounterEl.textContent = "";
+      if (tourTitleEl) tourTitleEl.textContent = "No tour data yet.";
+      if (tourBlurbEl) tourBlurbEl.textContent = "";
+      if (tourPrevEl) tourPrevEl.disabled = true;
+      if (tourNextEl) tourNextEl.disabled = true;
+      if (tourJumpEl) tourJumpEl.disabled = true;
+      return;
+    }
+    const stop = stops[tourIndex];
+    if (tourTierEl) tourTierEl.textContent = stop.tier;
+    if (tourCounterEl) tourCounterEl.textContent = `Stop ${tourIndex + 1} of ${stops.length}`;
+    if (tourTitleEl) tourTitleEl.textContent = stop.kind === "cycle" ? `${stop.label}: ${stop.members.join(", ")}` : stop.path;
+    if (tourBlurbEl) tourBlurbEl.textContent = stop.blurb;
+    if (tourPrevEl) tourPrevEl.disabled = tourIndex <= 0;
+    if (tourNextEl) tourNextEl.disabled = tourIndex >= stops.length - 1;
+    if (tourJumpEl) tourJumpEl.disabled = false;
+  }
 
   function setDepFilter(text) {
     depFilter = String(text || "").trim().toLowerCase();
@@ -963,6 +1103,8 @@ function createGraphApp(canvas, opts) {
     render: draw,
     // dep-mode surface
     loadDependencyGraph, setMode, getMode, setDepFilter, setDepHideExternal, setDepCollapseExternal, focusFirstMatch,
+    // Guided Tour surface
+    loadTour, tourGoTo, tourNext, tourPrev, tourJumpToFile, tourJumpToPath,
   };
 }
 
@@ -977,6 +1119,14 @@ function createGraphApp(canvas, opts) {
     tooltipEl: document.getElementById("tooltip"),
     statsEl: document.getElementById("stats"),
     hintEl: document.getElementById("depHint"),
+    tourPanelEl: document.getElementById("tourPanel"),
+    tourTierEl: document.getElementById("tourTier"),
+    tourCounterEl: document.getElementById("tourCounter"),
+    tourTitleEl: document.getElementById("tourTitle"),
+    tourBlurbEl: document.getElementById("tourBlurb"),
+    tourPrevEl: document.getElementById("tourPrev"),
+    tourNextEl: document.getElementById("tourNext"),
+    tourJumpEl: document.getElementById("tourJump"),
   });
   window.__lakshxGraphApp = app;
 
@@ -987,22 +1137,33 @@ function createGraphApp(canvas, opts) {
   // ---- mode toggle (segmented control) ----
   const modeCall = document.getElementById("modeCall");
   const modeDep = document.getElementById("modeDep");
+  const modeTour = document.getElementById("modeTour");
   const callLegend = document.getElementById("legend");
   const depLegend = document.getElementById("depLegend");
   const depControls = document.getElementById("depControls");
   const statsBar = document.getElementById("stats");
+  const tourPanel = document.getElementById("tourPanel");
   function reflectMode(m) {
     modeCall?.classList.toggle("active", m === "call");
     modeDep?.classList.toggle("active", m === "dep");
+    modeTour?.classList.toggle("active", m === "tour");
     if (callLegend) callLegend.hidden = m !== "call";
-    if (depLegend) depLegend.hidden = m !== "dep";
+    if (depLegend) depLegend.hidden = m === "call";
+    // search/hide-externals/collapse/re-scan controls only make sense for the
+    // free-exploration dependency view, not the guided step-through.
     if (depControls) depControls.hidden = m !== "dep";
-    if (statsBar) statsBar.hidden = m !== "dep";
+    if (statsBar) statsBar.hidden = m === "call";
+    if (tourPanel) tourPanel.hidden = m !== "tour";
   }
   modeCall?.addEventListener("click", () => { app.setMode("call"); reflectMode("call"); });
   modeDep?.addEventListener("click", () => {
     app.setMode("dep");
     reflectMode("dep");
+    if (app.__needsScan) { app.__needsScan(); }
+  });
+  modeTour?.addEventListener("click", () => {
+    app.setMode("tour");
+    reflectMode("tour");
     if (app.__needsScan) { app.__needsScan(); }
   });
 
@@ -1015,6 +1176,11 @@ function createGraphApp(canvas, opts) {
   const collapseExt = document.getElementById("depCollapseExt");
   collapseExt?.addEventListener("change", () => app.setDepCollapseExternal(collapseExt.checked));
 
+  // ---- Guided Tour controls ----
+  document.getElementById("tourPrev")?.addEventListener("click", () => app.tourPrev());
+  document.getElementById("tourNext")?.addEventListener("click", () => app.tourNext());
+  document.getElementById("tourJump")?.addEventListener("click", () => app.tourJumpToFile());
+
   const hasVsCodeApi = typeof acquireVsCodeApi === "function";
   if (hasVsCodeApi) {
     const vscode = acquireVsCodeApi();
@@ -1026,7 +1192,8 @@ function createGraphApp(canvas, opts) {
       openPath: (p) => vscode.postMessage({ type: "openPath", path: p }),
       requestScan: () => vscode.postMessage({ type: "scanDependencies" }),
     });
-    // when the user first switches to dep mode with no data, ask the host to scan
+    // when the user first switches to dep/tour mode with no data, ask the
+    // host to scan (both modes are fed by the exact same scan+tour payload)
     app.__needsScan = () => { if (!scanned) { scanned = true; vscode.postMessage({ type: "scanDependencies" }); } };
     const rescan = document.getElementById("depRescan");
     rescan?.addEventListener("click", () => { scanned = true; vscode.postMessage({ type: "scanDependencies" }); });
@@ -1036,8 +1203,18 @@ function createGraphApp(canvas, opts) {
       const msg = event.data;
       if (msg.type === "init") { app.loadGraph(msg); reflectMode("call"); }
       else if (msg.type === "expandResult") app.applyExpand(msg);
-      else if (msg.type === "depInit") { scanned = true; app.loadDependencyGraph(msg); reflectMode("dep"); }
+      else if (msg.type === "depInit") {
+        scanned = true;
+        app.loadDependencyGraph(msg); // loadDependencyGraph also loads msg.tour internally
+        reflectMode(app.getMode()); // preserves "tour" if that's why the scan was requested
+      }
       else if (msg.type === "switchToDep") { app.setMode("dep"); reflectMode("dep"); app.__needsScan(); }
+      else if (msg.type === "switchToTour") { app.setMode("tour"); reflectMode("tour"); app.__needsScan(); }
+      // host already had a cached scan (e.g. "Explain this file" -> "Show in
+      // Guided Tour" on a panel that was scanned earlier) and pushed mode
+      // directly instead of waiting on a round-trip scan request.
+      else if (msg.type === "setMode") { app.setMode(msg.mode); reflectMode(msg.mode); }
+      else if (msg.type === "tourJumpToPath") app.tourJumpToPath(msg.path);
       else if (msg.type === "error") app.showError(msg.message);
     });
   }

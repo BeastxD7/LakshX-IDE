@@ -5,8 +5,10 @@
   extension root over http (e.g. `python3 -m http.server` from
   product/lakshx-graph) and open /test/harness.html. Exercises the DEPENDENCY
   graph mode: force layout, search/filter, hide/collapse externals, click-to-
-  focus, hover tooltip, and cycle highlighting — plus the mode toggle back to
-  the call graph. NOT loaded by the extension — test-only.
+  focus, hover tooltip, and cycle highlighting; the GUIDED TOUR mode: step
+  panel (tier/counter/title/blurb), Next/Prev navigation, click-a-node-to-
+  jump, and the collapsed-cycle stop; plus the mode toggle back to the call
+  graph. NOT loaded by the extension — test-only.
 -->
 <html><head>
 <meta charset="UTF-8">
@@ -18,6 +20,7 @@
     <div id="modeToggle" role="tablist">
       <button id="modeDep" role="tab">Dependencies</button>
       <button id="modeCall" role="tab" class="active">Call graph</button>
+      <button id="modeTour" role="tab">Guided Tour</button>
     </div>
     <span id="title">Call Graph</span>
     <div class="spacer"></div>
@@ -47,8 +50,22 @@
     Build an interactive map of your workspace's file &amp; package dependencies.
     <br><button id="depScanBtn">Scan workspace</button>
   </div>
+  <div id="tourPanel" hidden>
+    <div id="tourHeader">
+      <span id="tourTier"></span>
+      <span id="tourCounter"></span>
+    </div>
+    <div id="tourTitle"></div>
+    <div id="tourBlurb"></div>
+    <div id="tourNav">
+      <button id="tourPrev" class="ghost">&larr; Prev</button>
+      <button id="tourJump" class="ghost">Jump to file</button>
+      <button id="tourNext" class="ghost">Next &rarr;</button>
+    </div>
+  </div>
   <div id="tooltip" hidden></div>
 </div>
+<script src="../lib/tour.js"></script>
 <script>
   // ---- mock extension host ----
   // Replies with a synthetic dependency graph on `scanDependencies`, mirroring
@@ -96,7 +113,11 @@
       fileCount: files.length, internalNodes: files.length, externalNodes: externals.length,
       edgeCount: edges.length, cycleCount: cycles.length, orphanCount: 1,
     };
-    return { type: "depInit", nodes, edges: edges.map(([from, to]) => ({ from, to, kind: "import" })), cycles, stats };
+    const graphEdges = edges.map(([from, to]) => ({ from, to, kind: "import" }));
+    // Real tour, computed by the SAME lib/tour.js the extension ships — not a
+    // hand-faked list — so the harness exercises the actual ordering/tiering.
+    const tour = window.LakshxTour.buildTour({ nodes, edges: graphEdges, cycles });
+    return { type: "depInit", nodes, edges: graphEdges, cycles, stats, tour };
   }
 
   window.acquireVsCodeApi = () => ({

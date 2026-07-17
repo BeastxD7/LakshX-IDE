@@ -28,6 +28,16 @@
         "icon": "$(type-hierarchy)"
       },
       {
+        "command": "lakshx.showGuidedTour",
+        "title": "LakshX: Show Guided Tour",
+        "icon": "$(list-ordered)"
+      },
+      {
+        "command": "lakshx.graph.explainFile",
+        "title": "LakshX: Explain This File",
+        "icon": "$(info)"
+      },
+      {
         "command": "lakshx.graph.scanVulnerabilities",
         "title": "LakshX: Scan Dependencies for Vulnerabilities",
         "icon": "$(shield)"
@@ -46,6 +56,10 @@
           "command": "lakshx.showCallGraph",
           "when": "editorHasCallHierarchyProvider",
           "group": "lakshx@1"
+        },
+        {
+          "command": "lakshx.graph.explainFile",
+          "group": "lakshx@2"
         }
       ],
       "commandPalette": [
@@ -55,6 +69,12 @@
         },
         {
           "command": "lakshx.showDependencyGraph"
+        },
+        {
+          "command": "lakshx.showGuidedTour"
+        },
+        {
+          "command": "lakshx.graph.explainFile"
         },
         {
           "command": "lakshx.graph.scanVulnerabilities"

@@ -17,6 +17,7 @@ const fs = require("fs");
 const path = require("path");
 const depgraph = require("./lib/depgraph.js");
 const vuln = require("./lib/vuln-check.js");
+const tourLib = require("./lib/tour.js");
 
 // ---- dependency-scan bounds (a bounded STATIC scan; no code is executed) ----
 const SCAN_MAX_FILES = 2000; // hard cap on files opened
@@ -160,6 +161,12 @@ let currentSession = null;
 // Maps a workspace-relative POSIX path (a dep-graph node id) back to its Uri so
 // the webview's "open this file" click can resolve it. Rebuilt on every scan.
 let depPathToUri = new Map();
+// The FULL (uncapped) graph from the most recent scan — the Guided Tour and
+// "Explain this file" both need the real, complete metrics, not the
+// RENDER_NODE_CAP-truncated view shipped to the canvas. Reused across
+// showGuidedTour/explainActiveFile so a second feature doesn't force a
+// redundant re-scan of the workspace.
+let lastScanGraph = null;
 
 // ---------------------------------------------------------------------------
 // Dependency graph: workspace scan
@@ -207,7 +214,13 @@ async function gatherWorkspaceFiles(progress) {
 async function scanDependencyGraph(progress) {
   const files = await gatherWorkspaceFiles(progress);
   const graph = depgraph.buildGraph(files);
-  return capGraphForRender(graph);
+  lastScanGraph = graph;
+  // Guided Tour ordering is computed on the FULL graph (not the render-capped
+  // view below) so its tiers/metrics stay honest even when a huge monorepo's
+  // canvas render gets truncated — see capGraphForRender's own comment for the
+  // same tradeoff on the dependency-graph render path.
+  const tour = tourLib.buildTour(graph);
+  return { ...capGraphForRender(graph), tour };
 }
 
 /**
@@ -309,6 +322,98 @@ async function showDependencyGraph(context) {
   // ask the webview to switch to dep mode; it will request a scan if it has no
   // data yet (keeps the scan lazy and driven from one place).
   currentPanel.webview.postMessage({ type: "switchToDep" });
+}
+
+/**
+ * Guided Tour — a sequential, dependency-ordered walkthrough built on the
+ * SAME scan/data as the dependency graph (lib/tour.js just reorders/tiers
+ * what's already there). If we already have a scan cached (lastScanGraph),
+ * ship it to the webview immediately rather than round-tripping a fresh
+ * "scanDependencies" request — this is also what makes "Explain this file"
+ * -> "Show in Guided Tour" feel instant on a panel that's already been used.
+ * @param {object} [opts]
+ * @param {string} [opts.jumpToPath] workspace-relative path to land the tour on
+ */
+async function showGuidedTour(context, opts = {}) {
+  ensurePanel(context);
+  currentPanel.title = "LakshX Guided Tour";
+  if (lastScanGraph) {
+    // Flip the webview into tour mode FIRST, then ship the (already-cached)
+    // scan — mirrors the "switchToTour then scan" ordering of the cold path
+    // below, so loadDependencyGraph's mode-preservation logic (media/graph.js)
+    // behaves identically regardless of which path got us here.
+    currentPanel.webview.postMessage({ type: "setMode", mode: "tour" });
+    const tour = tourLib.buildTour(lastScanGraph);
+    currentPanel.webview.postMessage({ type: "depInit", ...capGraphForRender(lastScanGraph), tour });
+  } else {
+    // no scan yet — same lazy-scan pattern as showDependencyGraph; the
+    // webview requests one itself once it sees switchToTour with no data.
+    currentPanel.webview.postMessage({ type: "switchToTour" });
+  }
+  if (opts.jumpToPath) {
+    // Queued regardless of whether depInit above was synchronous or is still
+    // pending a scan round-trip — the webview buffers this until tour data
+    // actually lands (see media/graph.js's pendingTourJumpPath).
+    currentPanel.webview.postMessage({ type: "tourJumpToPath", path: opts.jumpToPath });
+  }
+}
+
+/**
+ * "Explain this file" — `lakshx.graph.explainFile`. Looks up the ACTIVE
+ * editor's file in the dependency graph (scanning the workspace first if
+ * nothing's cached yet) and surfaces its real fan-in/fan-out, tier, and
+ * cycle membership via lib/tour.js's explainNode(). Entirely self-contained
+ * within lakshx-graph — no cross-extension dependency on lakshx-chat, and
+ * every number shown comes straight from the static import scan, nothing
+ * invented. The optional "Show in Guided Tour" action reuses the Guided Tour
+ * panel to give it visual context alongside the rest of the codebase walk.
+ */
+async function explainActiveFile(context) {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    vscode.window.showInformationMessage("LakshX: open a file first to explain its place in the dependency graph.");
+    return;
+  }
+  if (!vscode.workspace.workspaceFolders || vscode.workspace.workspaceFolders.length === 0) {
+    vscode.window.showInformationMessage("LakshX: open a folder/workspace to explain a file's place in the dependency graph.");
+    return;
+  }
+  const relPath = relPathOf(editor.document.uri);
+  if (!depgraph.languageOf(relPath)) {
+    vscode.window.showInformationMessage(`LakshX: ${path.basename(relPath)} isn't a scanned language (JS/TS/Python) — nothing to explain.`);
+    return;
+  }
+
+  let graph = lastScanGraph;
+  if (!graph) {
+    try {
+      graph = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Window, title: "LakshX: scanning dependencies" },
+        async (progress) => {
+          const files = await gatherWorkspaceFiles(progress);
+          const g = depgraph.buildGraph(files);
+          lastScanGraph = g;
+          return g;
+        },
+      );
+    } catch (err) {
+      vscode.window.showWarningMessage(`LakshX: couldn't scan the workspace (${err && err.message ? err.message : err}).`);
+      return;
+    }
+  }
+
+  const info = tourLib.explainNode(graph, relPath);
+  if (!info) {
+    vscode.window.showInformationMessage(`LakshX: ${relPath} has no recorded internal imports or importers in this workspace scan.`);
+    return;
+  }
+
+  const cycleNote = info.inCycle ? ` Part of a ${info.cycleMembers.length}-file circular dependency.` : "";
+  const summary = `${relPath} — ${info.blurb}${cycleNote}`;
+  const choice = await vscode.window.showInformationMessage(summary, "Show in Guided Tour");
+  if (choice === "Show in Guided Tour") {
+    await showGuidedTour(context, { jumpToPath: relPath });
+  }
 }
 
 async function showCallGraph(context) {
@@ -424,6 +529,7 @@ function panelHtml(context, webview) {
     <div id="modeToggle" role="tablist">
       <button id="modeDep" role="tab">Dependencies</button>
       <button id="modeCall" role="tab" class="active">Call graph</button>
+      <button id="modeTour" role="tab">Guided Tour</button>
     </div>
     <span id="title">Call Graph</span>
     <div class="spacer"></div>
@@ -452,6 +558,19 @@ function panelHtml(context, webview) {
   <div id="depHint" hidden>
     Build an interactive map of your workspace's file &amp; package dependencies — imports, fan-in/out, and circular dependencies.
     <br><button id="depScanBtn">Scan workspace</button>
+  </div>
+  <div id="tourPanel" hidden>
+    <div id="tourHeader">
+      <span id="tourTier"></span>
+      <span id="tourCounter"></span>
+    </div>
+    <div id="tourTitle"></div>
+    <div id="tourBlurb"></div>
+    <div id="tourNav">
+      <button id="tourPrev" class="ghost">&larr; Prev</button>
+      <button id="tourJump" class="ghost">Jump to file</button>
+      <button id="tourNext" class="ghost">Next &rarr;</button>
+    </div>
   </div>
   <div id="tooltip" hidden></div>
 </div>
@@ -894,6 +1013,15 @@ function activate(context) {
   vulnStatusItem.command = "lakshx.graph.scanVulnerabilities";
   vulnStatusItem.show();
 
+  // Guided Tour entry point — fourth item in the same right-aligned cluster,
+  // priority 994 (right after Vuln Scan's 995). Needs no cursor, so it's
+  // always actionable, same as Dep Graph.
+  const tourStatusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 994);
+  tourStatusItem.text = "$(list-ordered) Guided Tour";
+  tourStatusItem.tooltip = "LakshX: Walk the workspace dependency-ordered — entry points first, shared utilities/persistence last";
+  tourStatusItem.command = "lakshx.showGuidedTour";
+  tourStatusItem.show();
+
   // --- Vulnerability-hint wiring -------------------------------------------
   extContext = context;
   vulnOutputChannel = vscode.window.createOutputChannel("LakshX: Vulnerability Scan");
@@ -920,6 +1048,8 @@ function activate(context) {
   context.subscriptions.push(
     vscode.commands.registerCommand("lakshx.showCallGraph", () => showCallGraph(context)),
     vscode.commands.registerCommand("lakshx.showDependencyGraph", () => showDependencyGraph(context)),
+    vscode.commands.registerCommand("lakshx.showGuidedTour", () => showGuidedTour(context)),
+    vscode.commands.registerCommand("lakshx.graph.explainFile", () => explainActiveFile(context)),
     vscode.commands.registerCommand("lakshx.graph.scanVulnerabilities", () => runFullWorkspaceVulnScan()),
     vscode.workspace.onDidOpenTextDocument((doc) => scheduleVulnScan(doc)),
     vscode.workspace.onDidSaveTextDocument((doc) => scheduleVulnScan(doc)),
@@ -930,6 +1060,7 @@ function activate(context) {
     statusItem,
     depStatusItem,
     vulnStatusItem,
+    tourStatusItem,
     vulnOutputChannel,
     vulnDiagnostics,
     vulnDecorationType,

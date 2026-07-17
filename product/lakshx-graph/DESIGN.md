@@ -1,18 +1,22 @@
 # LakshX Graph — design notes
 
-This extension now ships **two** graph views in one webview panel:
+This extension now ships **three** views in one webview panel:
 
 1. **Call graph** (pre-existing) — function call hierarchy seeded from the
    cursor, driven by VS Code's own `vscode.prepareCallHierarchy` /
    `provideIncoming|OutgoingCalls` LSP surface. Layered left→right tree.
-2. **Dependency graph** (new) — a workspace-wide, interactive map of file,
+2. **Dependency graph** — a workspace-wide, interactive map of file,
    module and package **import** dependencies. Force-directed.
+3. **Guided Tour** (new, §5 below) — a sequential, dependency-ordered
+   walkthrough of the SAME dependency graph (API/entry layer → business
+   logic → shared utilities/persistence), reusing its canvas verbatim and
+   just adding an ordering pass (`lib/tour.js`) plus a step panel.
 
 A segmented toggle in the toolbar switches between them; each mode owns its
-own legend, controls and render path. The two share only zoom/pan and the
-canvas — call-mode state (`nodesById`/`edges`/`parentOf`) is never touched by
-dep-mode (its own `depNodes`/`depEdges`), so the existing call graph keeps
-working unchanged.
+own legend, controls and render path. Guided Tour reuses dep-mode's canvas
+and view state (`depNodes`/`depEdges`) directly — it is not a fourth
+rendering system — while call-mode state (`nodesById`/`edges`/`parentOf`) is
+never touched by either, so the existing call graph keeps working unchanged.
 
 ## 1. Dependency extraction
 
@@ -88,16 +92,79 @@ sibling webviews; CSP stays `default-src 'none'` with scoped script/style/font
   populated by its own command/scan; switching to an empty view shows a hint +
   "Scan workspace" button rather than guessing at the cursor.
 
+## 5. Guided Tour
+
+A third webview mode: a sequential, dependency-ordered walkthrough built on
+the SAME scan as the dependency graph — not a new analysis, an ordering pass
+over data that already exists.
+
+- **Ordering** (`lib/tour.js`, pure/vscode-free, unit-tested with
+  `node --test`): every cyclic cluster from `graph.cycles` (Tarjan SCCs
+  `depgraph.js` already computes) collapses into ONE tour stop, so a circular
+  dependency can't produce an infinite/duplicated walk — it becomes a single
+  "N files, circular" stop. Every other internal file is its own stop. Each
+  stop gets a **net** fan-in/fan-out (edges crossing its boundary only —
+  intra-cluster edges are excluded so a cyclic cluster scores as one unit).
+  Stops bucket into four tiers, evaluated in order:
+  1. **Entry points** — net fan-in 0 (nothing imports it)
+  2. **Orchestration / API layer** — fan-out > fan-in
+  3. **Core business logic** — fan-out === fan-in
+  4. **Shared utilities & persistence** — fan-in > fan-out
+  Within a tier, stops sort by `(fanOut - fanIn)` descending (ties: fanOut
+  desc, then id asc) so the most entry-point-shaped stops in a tier lead.
+- **Blurb generation**: every sentence is built from the stop's own
+  fanIn/fanOut/kind — no invented prose. E.g. `fanIn=0` → "Entry point — no
+  internal file imports it; it depends on N others."; `fanIn > fanOut` →
+  "Widely-used utility — imported by N files, depending on …"; a cycle stop
+  gets a "Circular dependency cluster of N files — " prefix, then the same
+  accurate sentence for its net metrics.
+- **UI**: reuses the dependency graph's force-directed canvas verbatim — the
+  tour only drives which node(s) are highlighted (`tourFocusIds`, a superset
+  of the click-to-focus `depFocus` so a cyclic cluster's stop lights every
+  member at once) and adds a step panel (`#tourPanel`) with tier badge, "Stop
+  N of M" counter, title, blurb, and Prev/Next/"Jump to file" controls. No
+  second rendering system. Clicking a node while touring jumps straight to
+  that node's stop (find-a-file-in-context, without a separate lookup UI).
+- **Entry points**: command **`lakshx.showGuidedTour`** + a status bar item
+  `$(list-ordered) Guided Tour` at priority **994**. The host computes the
+  tour alongside the dependency scan (`extension.js`'s `scanDependencyGraph`)
+  and ships both in the same `depInit` payload, so one scan feeds all three
+  modes — switching tabs never re-scans unless the user hits Re-scan.
+
+## 6. "Explain this file"
+
+Command **`lakshx.graph.explainFile`** ("LakshX: Explain This File") looks up
+the ACTIVE editor's file in the dependency graph (scanning first if nothing's
+cached) via `lib/tour.js`'s `explainNode(graph, path)`: real fan-in/fan-out,
+direct dependents/dependencies, and cycle membership, straight from the
+static scan — nothing invented. Surfaced as a `showInformationMessage`
+summary (QuickInfo-style) with an optional **"Show in Guided Tour"** action
+that reuses the tour panel for deeper visual context, jumping straight to
+that file's stop. Entirely self-contained within `lakshx-graph` — no
+cross-extension dependency on `lakshx-chat`.
+
 ## Verification & honesty
 
-- `node --check` passes on `extension.js`, `media/graph.js`, `lib/depgraph.js`.
-- `node --test` — 25 passing tests for extraction, resolution, `buildGraph`
-  metrics, and cycle detection (2-cycle, 3-cycle, DAG, self-loop, 300-node ring).
+- `node --check` passes on `extension.js`, `media/graph.js`, `lib/depgraph.js`,
+  `lib/tour.js`.
+- `node --test` — 70 passing tests total: 25 for extraction/resolution/
+  `buildGraph`/cycle detection, 26 for the vulnerability checker, and 19 new
+  ones for `lib/tour.js` (ordering/tiering on a real `buildGraph()` fixture
+  with an entry point, orchestration, core-logic, a widely-used utility, and
+  a 3-file cycle; exact blurb text for every tier; `explainNode` on both a
+  plain file and one inside a cycle).
 - Renderer + all dep interactions verified in `test/harness.html` via a headless
   Chrome pass (force layout, cycle highlight, search, click-to-focus, hover
-  tooltip, collapse-externals), plus a call-graph regression render. No console
-  or CSP errors observed.
-- **Not verified live**: the `vscode.workspace.findFiles` scan path runs only
+  tooltip, collapse-externals), plus a call-graph regression render. **Guided
+  Tour** verified the same way: stepping Next through all 13 stops of the
+  harness's sample graph (entry point → orchestration → core logic → the
+  3-file cycle collapsing into one highlighted stop → the widely-used
+  logger.ts utility as the final stop, with Next correctly disabled), the
+  "Jump to file" button emitting the right `openPath` message, and
+  click-a-node-to-jump landing on the correct stop. No console or CSP errors
+  observed.
+- **Not verified live**: the `vscode.workspace.findFiles` scan path (shared by
+  the dependency graph, Guided Tour, and "Explain this file") runs only
   inside a real extension host, which isn't available here. That wiring is
-  code-reviewed and inspection-only; the extraction/model it feeds is fully
-  tested in isolation.
+  code-reviewed and inspection-only; the extraction/model and tour/blurb
+  logic it feeds are fully tested in isolation.
