@@ -6,8 +6,17 @@ cd "$(dirname "$0")/.."
 
 [ -d upstream/.git ] || { echo "upstream/ missing — run scripts/fetch-vscode.sh first" >&2; exit 1; }
 
-# Reset any previous overlay so re-running is safe
-git -C upstream checkout -f -- . 2>/dev/null || true
+# Reset any previous overlay so re-running is safe. NOTE: `git apply --3way`
+# (below) implies --index, so a prior successful run leaves the patched content
+# STAGED in upstream/'s index. A plain `checkout -f -- .` restores the working
+# tree FROM that dirty index, so the tree stays patched and the patches then
+# fail to re-apply on the next run with "<file>: does not match index". Reset
+# hard to the pinned tag (clears BOTH index and working tree), then clean the
+# overlay-added untracked files (built-in extensions, injected assets) so
+# apply-ui.mjs / install-icons.mjs regenerate from scratch. No -x on clean, so
+# the gitignored node_modules / .build are preserved (no needless reinstall).
+git -C upstream reset --hard HEAD
+git -C upstream clean -fd
 
 # Merge product/product.overrides.json into upstream/product.json
 node -e '
