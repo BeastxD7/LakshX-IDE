@@ -15,6 +15,7 @@ import { toolResultText } from "./providers/types.js";
 import { probeProvider } from "./providers/validate.js";
 import { loadSessionFile, pruneSessions, saveSessionSoon, type PromptCheckpoint, type PromptMarker } from "./store.js";
 import { backgroundTasks, formatTaskNotifications } from "./tasks.js";
+import { pruneTraces } from "./trace-store.js";
 import { capToolImageBase64 } from "./tool-image-cap.js";
 
 interface Session extends AgentSession {
@@ -63,6 +64,10 @@ function persistSession(id: string, s: Session): void {
 
 // housekeeping: bound ~/.lakshx/sessions/ so it never grows unbounded
 pruneSessions();
+// same housekeeping for ~/.lakshx/traces/ (trace-store.ts's always-on local
+// recorder — see docs/architecture.md §10 item 1 for why this exists
+// alongside, not instead of, the Langfuse tracer above)
+pruneTraces();
 
 const MODES = [
   { id: "review", name: "Review", description: "Read-only: research the codebase and produce an implementation plan" },

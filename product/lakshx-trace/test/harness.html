@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<!--
+  Static visual harness for media/trace.js — loads the real trace-viewer UI
+  in a plain browser with a mock acquireVsCodeApi() standing in for
+  extension.js (same pattern as lakshx-graph/lakshx-chat/lakshx-welcome/
+  lakshx-commentary's own test/harness.html files). Serve the extension root
+  over http (e.g. `python3 -m http.server` from product/lakshx-trace) and
+  open /test/harness.html.
+
+  Exercises: the session picker (2 sessions), a turn timeline with mixed
+  pass/fail tool calls, per-turn expand/collapse, per-tool-call truncated
+  input/output with "…more" expansion, aggregate stats + slowest-tool-calls,
+  a turn with a HIDDEN tool-call count (the "don't render 10,000 at once"
+  cap), and pagination ("Show more" across 45 turns at a page size of 20).
+-->
+<html><head>
+<meta charset="UTF-8">
+<title>LakshX Trace harness</title>
+<link rel="stylesheet" href="../media/trace.css">
+</head><body>
+<div id="app">
+  <div id="toolbar">
+    <span id="title">Agent Trace</span>
+    <select id="sessionPicker" title="Pick a recorded agent session"></select>
+    <div class="spacer"></div>
+    <button id="refresh" class="ghost" title="Re-scan ~/.lakshx/traces/ for sessions">Refresh</button>
+  </div>
+
+  <div id="empty" class="msg" hidden>No recorded agent sessions yet. Run a prompt in LakshX chat, then come back here.</div>
+  <div id="error" class="msg" hidden></div>
+
+  <div id="content" hidden>
+    <div id="stats">
+      <div class="stat"><span class="statLabel">Turns</span><span id="statTurns" class="statValue">0</span></div>
+      <div class="stat"><span class="statLabel">Input tokens</span><span id="statInputTokens" class="statValue">0</span></div>
+      <div class="stat"><span class="statLabel">Output tokens</span><span id="statOutputTokens" class="statValue">0</span></div>
+      <div class="stat"><span class="statLabel">Tool calls</span><span id="statToolCalls" class="statValue">0</span></div>
+      <div class="stat"><span class="statLabel">Tool errors</span><span id="statErrors" class="statValue">0</span></div>
+    </div>
+    <div id="slowest">
+      <h3>Slowest tool calls</h3>
+      <ul id="slowestList"></ul>
+    </div>
+    <h3 class="timelineHeading">Timeline</h3>
+    <ul id="timeline"></ul>
+    <button id="showMore" class="ghost" hidden>Show more</button>
+  </div>
+</div>
+<script>
+  // ---- mock extension host ----
+  const reply = (msg) => setTimeout(() => window.postMessage(msg, "*"), 0);
+
+  const SESSIONS = [
+    { key: "9f2c1a7e-session-alpha", mtimeMs: Date.now(), size: 48213 },
+    { key: "3b88d0f1-session-beta", mtimeMs: Date.now() - 3600_000, size: 1024 },
+  ];
+
+  // Session "alpha": 45 turns (exercises pagination across a page size of 20,
+  // i.e. 3 pages: 20 / 20 / 5), mixed pass/fail tool calls, one turn with a
+  // HIDDEN tool-call count, and long input/output text to exercise "…more".
+  function buildAlphaTurns() {
+    const turns = [];
+    for (let i = 0; i < 45; i++) {
+      const startedAt = Date.now() - (45 - i) * 60_000;
+      const toolCalls = [];
+      const n = i === 40 ? 3 : 2; // turn 40 gets a hiddenToolCallCount below
+      for (let j = 0; j < n; j++) {
+        const isError = (i + j) % 7 === 0;
+        toolCalls.push({
+          name: j % 2 === 0 ? "read_file" : "bash",
+          startedAt: startedAt + j * 100,
+          endedAt: startedAt + j * 100 + (isError ? 3200 : 150 + j * 40),
+          inputSummary: j % 2 === 0
+            ? `{"path":"src/components/Widget${i}.tsx"}`
+            : "x".repeat(400) + " (a deliberately long bash command output to exercise …more truncation)",
+          outputSummary: isError
+            ? `ERROR: something went wrong on turn ${i}, call ${j}`
+            : `ok — ${"y".repeat(350)}`,
+          isError,
+        });
+      }
+      const turn = {
+        promptId: `pr_${i}`,
+        sessionId: "9f2c1a7e-session-alpha",
+        startedAt,
+        endedAt: startedAt + 2400 + n * 200,
+        model: "anthropic/claude-sonnet-5",
+        generations: [{ startedAt, endedAt: startedAt + 900, model: "anthropic/claude-sonnet-5", inputSummary: "system+history", outputSummary: "…", isError: false, usage: { inputTokens: 1200 + i, outputTokens: 80 + i } }],
+        toolCalls,
+        usage: { inputTokens: 1200 + i, outputTokens: 80 + i },
+      };
+      if (i === 40) turn.hiddenToolCallCountForHarness = 137; // see shapePage below
+      turns.push(turn);
+    }
+    return turns;
+  }
+
+  const ALPHA_TURNS = buildAlphaTurns();
+  const BETA_TURNS = [
+    {
+      promptId: "pr_beta_0",
+      sessionId: "3b88d0f1-session-beta",
+      startedAt: Date.now() - 7200_000,
+      endedAt: Date.now() - 7199_000,
+      model: "openai/gpt-5",
+      generations: [{ startedAt: 0, endedAt: 500, model: "openai/gpt-5", inputSummary: "hi", outputSummary: "hello", isError: false, usage: { inputTokens: 30, outputTokens: 10 } }],
+      toolCalls: [],
+      usage: { inputTokens: 30, outputTokens: 10 },
+    },
+  ];
+
+  const PAGE_SIZE = 20;
+  function statsFor(turns) {
+    let totalInputTokens = 0, totalOutputTokens = 0, totalToolCalls = 0, totalErrors = 0;
+    const all = [];
+    for (const t of turns) {
+      totalInputTokens += (t.usage && t.usage.inputTokens) || 0;
+      totalOutputTokens += (t.usage && t.usage.outputTokens) || 0;
+      for (const tc of t.toolCalls || []) {
+        totalToolCalls++;
+        if (tc.isError) totalErrors++;
+        all.push({ promptId: t.promptId, name: tc.name, durationMs: tc.endedAt - tc.startedAt, isError: tc.isError });
+      }
+    }
+    all.sort((a, b) => b.durationMs - a.durationMs);
+    return { totalTurns: turns.length, totalInputTokens, totalOutputTokens, totalToolCalls, totalErrors, slowestToolCalls: all.slice(0, 10) };
+  }
+
+  function shapePage(turns, offset, pageSize) {
+    const sorted = turns.slice().sort((a, b) => b.startedAt - a.startedAt);
+    const page = sorted.slice(offset, offset + pageSize).map((t) => {
+      const shaped = { ...t };
+      if (t.hiddenToolCallCountForHarness) {
+        shaped.hiddenToolCallCount = t.hiddenToolCallCountForHarness;
+        delete shaped.hiddenToolCallCountForHarness;
+      }
+      return shaped;
+    });
+    return { page, hasMore: offset + pageSize < sorted.length, total: sorted.length };
+  }
+
+  window.acquireVsCodeApi = () => ({
+    getState() {}, setState() {},
+    postMessage(m) {
+      console.log("[trace→ext]", JSON.stringify(m).slice(0, 200));
+      if (m.type === "listSessions") {
+        reply({ type: "sessions", sessions: SESSIONS });
+      } else if (m.type === "loadSession") {
+        const turns = m.key === SESSIONS[0].key ? ALPHA_TURNS : BETA_TURNS;
+        const { page, hasMore, total } = shapePage(turns, m.offset || 0, m.pageSize || PAGE_SIZE);
+        reply({ type: "sessionPage", key: m.key, turns: page, hasMore, offset: m.offset || 0, total, stats: statsFor(turns) });
+      }
+    },
+  });
+</script>
+<script src="../media/trace.js"></script>
+</body></html>

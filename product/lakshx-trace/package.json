@@ -1,0 +1,34 @@
+{
+  "name": "lakshx-trace",
+  "displayName": "LakshX Trace",
+  "description": "Agent trace/observability inspector — per-turn timing, token spend, and an expandable tool-call trace for the LakshX agent's OWN behavior. Not a database tool; see lakshx-db for that. Reads ~/.lakshx/traces/ (written by the agent's always-on local trace recorder, agent/src/trace-store.ts) directly, with no dependency on Langfuse or a live agent process.",
+  "version": "0.0.1",
+  "publisher": "lakshx",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.128.0"
+  },
+  "main": "./extension.js",
+  "scripts": {
+    "test:unit": "node --test test/*.test.js"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "lakshx.trace.showPanel",
+        "title": "LakshX: Show Agent Trace",
+        "icon": "$(pulse)"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "lakshx.trace.showPanel"
+        }
+      ]
+    }
+  }
+}

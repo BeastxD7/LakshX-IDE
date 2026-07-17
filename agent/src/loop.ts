@@ -46,6 +46,7 @@ import {
 } from "./tasks.js";
 import { clip, TOOLS, toolByName, type ToolImageAttachment, type ToolSpec } from "./tools.js";
 import { getTracer, type PromptTrace } from "./tracing.js";
+import { wrapWithLocalTrace } from "./trace-store.js";
 import { isVisionCapableModel } from "./vision.js";
 import { freezeSpec, parseVerificationSpecInput, runVerification, type VerificationSpec } from "./verify.js";
 
@@ -1417,13 +1418,21 @@ export async function runPrompt(
   // user has fully configured Langfuse (see tracing.ts's module doc) — never
   // an `if` branch here, the no-op tracer absorbs every call below silently.
   const tracer = getTracer(cfg);
-  const trace = tracer.startTrace({
-    id: promptId,
-    name: "runPrompt",
-    sessionId,
-    input: summarizeText(userText),
-    metadata: { mode: session.mode, model },
-  });
+  // ALWAYS-ON local recording (trace-store.ts), independent of whether the
+  // Langfuse tracer above is real or NOOP_TRACER: closes the "zero visibility
+  // unless you've self-hosted Langfuse" gap for everyone else. Decorates the
+  // exact same PromptTrace shape at the exact same call sites below — never
+  // a second startTrace-like call, never a restructuring of this function.
+  const trace = wrapWithLocalTrace(
+    tracer.startTrace({
+      id: promptId,
+      name: "runPrompt",
+      sessionId,
+      input: summarizeText(userText),
+      metadata: { mode: session.mode, model },
+    }),
+    { promptId, sessionId, model },
+  );
 
   try {
     // Royal Mode 2.0 Stage B: the phase machine wraps `runPromptLoop` for a
