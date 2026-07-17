@@ -21,7 +21,7 @@ const { listEngines, getDriver } = require("./lib/engines.js");
 const { redactText } = require("./lib/redact.js");
 const { createRunReadOnlyQuery } = require("./lib/query-api.js");
 const { DEFAULT_TIMEOUT_MS } = require("./lib/query-guard.js");
-const { buildBoundedSelect, shapeSqlPage, shapeMongoPage, DEFAULT_PAGE_SIZE } = require("./lib/data-browse.js");
+const { buildBoundedSelect, shapeSqlPage, shapeMongoPage, dataBrowseStrategyFor, DEFAULT_PAGE_SIZE } = require("./lib/data-browse.js");
 
 // Data-browsing page size (rows/documents per page). The bounded SELECT asks
 // for PAGE_SIZE + 1 (a probe row) to detect "has more" without a COUNT; we
@@ -126,8 +126,10 @@ class DbSession {
   /** Load one bounded page of rows/documents for a browsed table/collection and
    * post it to the webview. Reuses the EXISTING read-only machinery: SQL goes
    * through driver.runReadOnlyQuery (fresh read-only transaction, row cap,
-   * timeout); Mongo through a find-only cursor. This is direct user browsing —
-   * NOT gated by the "Allow AI queries" opt-in. */
+   * timeout); Mongo through its own find-only cursor (driver.fetchCollectionPage
+   * — see dataBrowseStrategyFor, which checks this BEFORE runReadOnlyQuery
+   * since mongo.js implements both). This is direct user browsing — NOT gated
+   * by the "Allow AI queries" opt-in. */
   async loadTable(tableName, page) {
     const seq = ++this.loadSeq;
     const pageIdx = Math.max(0, Math.floor(Number(page)) || 0);
@@ -139,7 +141,15 @@ class DbSession {
       }
 
       let payload;
-      if (typeof this.driver.runReadOnlyQuery === "function") {
+      const strategy = dataBrowseStrategyFor(this.driver);
+      if (strategy === "mongo") {
+        // Mongo: find-only bounded page over the live client + resolved dbName.
+        const { docs } = await this.driver.fetchCollectionPage(handle, this.dbName, tableName, {
+          pageSize: PAGE_SIZE,
+          page: pageIdx,
+        });
+        payload = shapeMongoPage({ docs: docs || [], pageSize: PAGE_SIZE, page: pageIdx });
+      } else if (strategy === "sql") {
         // SQL engines: bounded SELECT with a safely-quoted catalog table name,
         // run through the read-only path. maxRows = PAGE_SIZE + 1 so the path's
         // own outer LIMIT never clips the probe row (see lib/data-browse.js).
@@ -151,13 +161,6 @@ class DbSession {
           pageSize: PAGE_SIZE,
           page: pageIdx,
         });
-      } else if (typeof this.driver.fetchCollectionPage === "function") {
-        // Mongo: find-only bounded page over the live client + resolved dbName.
-        const { docs } = await this.driver.fetchCollectionPage(handle, this.dbName, tableName, {
-          pageSize: PAGE_SIZE,
-          page: pageIdx,
-        });
-        payload = shapeMongoPage({ docs: docs || [], pageSize: PAGE_SIZE, page: pageIdx });
       } else {
         throw new Error("This engine does not support data browsing.");
       }

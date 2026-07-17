@@ -23,6 +23,7 @@ const {
   quoteSegment,
   quoteTableName,
   buildBoundedSelect,
+  dataBrowseStrategyFor,
   serializeCell,
   shapeSqlPage,
   flattenMongoDoc,
@@ -31,6 +32,8 @@ const {
 } = require("../lib/data-browse.js");
 const { wrapWithRowLimit } = require("../lib/query-guard.js");
 const sqlite = require("../lib/drivers/sqlite.js");
+const mongoDriver = require("../lib/drivers/mongo.js");
+const postgresDriver = require("../lib/drivers/postgres.js");
 
 // ---------- clamps + offset ----------
 
@@ -87,6 +90,34 @@ test("buildBoundedSelect safely quotes a hostile table name (no identifier break
   // A table literally named  x" OR 1=1 --  cannot escape its quotes.
   const sql = buildBoundedSelect("sqlite", 'x" OR 1=1 --', { pageSize: 5, page: 0 });
   assert.equal(sql, 'SELECT * FROM "x"" OR 1=1 --" LIMIT 6 OFFSET 0');
+});
+
+// ---------- dataBrowseStrategyFor (regression: Data tab was 100% broken for Mongo) ----------
+//
+// Real bug, hit in the wild: mongo.js's driver implements BOTH
+// fetchCollectionPage (its own find-only cursor, for browsing) AND
+// runReadOnlyQuery (JSON-query-spec based, for the separate AI db_query
+// tool). loadTable used to check `runReadOnlyQuery` first, so it ALWAYS took
+// the SQL branch for Mongo too — building a `SELECT * FROM ...` string via
+// buildBoundedSelect and feeding it to mongo.js's JSON parser, which failed
+// every single browse with "Mongo query must be JSON like ... — the given
+// string is not valid JSON." These tests exercise the REAL driver modules
+// (not mocks) so a future driver change can't silently reintroduce this.
+test("dataBrowseStrategyFor: the real mongo driver resolves to 'mongo', not 'sql' — the exact regression this fixes", () => {
+  assert.equal(typeof mongoDriver.fetchCollectionPage, "function", "precondition: mongo.js must still export fetchCollectionPage");
+  assert.equal(typeof mongoDriver.runReadOnlyQuery, "function", "precondition: mongo.js must still ALSO export runReadOnlyQuery (for db_query)");
+  assert.equal(dataBrowseStrategyFor(mongoDriver), "mongo");
+});
+
+test("dataBrowseStrategyFor: a SQL driver (no fetchCollectionPage) resolves to 'sql'", () => {
+  assert.equal(typeof postgresDriver.fetchCollectionPage, "undefined", "precondition: postgres.js must not implement fetchCollectionPage");
+  assert.equal(dataBrowseStrategyFor(postgresDriver), "sql");
+});
+
+test("dataBrowseStrategyFor: a driver with neither function is unsupported", () => {
+  assert.equal(dataBrowseStrategyFor({}), null);
+  assert.equal(dataBrowseStrategyFor(null), null);
+  assert.equal(dataBrowseStrategyFor(undefined), null);
 });
 
 // ---------- the load-bearing pagination invariant ----------

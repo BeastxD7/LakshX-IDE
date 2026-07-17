@@ -99,6 +99,23 @@ function buildBoundedSelect(engine, tableName, { pageSize = DEFAULT_PAGE_SIZE, p
   return `SELECT * FROM ${from} LIMIT ${limit} OFFSET ${offset}`;
 }
 
+/**
+ * Which data-browsing strategy `loadTable` should use for a given driver.
+ * Mongo's driver implements BOTH `fetchCollectionPage` (its own find-only
+ * cursor, for browsing) AND `runReadOnlyQuery` (JSON-query-spec based, for
+ * the separate AI db_query tool) — so `fetchCollectionPage` MUST be checked
+ * first. Checking `runReadOnlyQuery` first would build a `SELECT * FROM ...`
+ * string via buildBoundedSelect and feed it to Mongo's JSON parser, failing
+ * every browse with "Mongo query must be JSON like ... — the given string is
+ * not valid JSON." (a real bug this function's test coverage exists to catch
+ * a regression of). Every SQL driver implements only `runReadOnlyQuery`.
+ */
+function dataBrowseStrategyFor(driver) {
+  if (typeof driver?.fetchCollectionPage === "function") return "mongo";
+  if (typeof driver?.runReadOnlyQuery === "function") return "sql";
+  return null;
+}
+
 // ---- cell serialization (transport shape for the webview) ------------------
 
 /**
@@ -286,6 +303,7 @@ module.exports = {
   quoteSegment,
   quoteTableName,
   buildBoundedSelect,
+  dataBrowseStrategyFor,
   serializeCell,
   shapeSqlPage,
   flattenMongoDoc,
