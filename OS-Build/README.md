@@ -11,6 +11,57 @@ truth for how each platform is actually built) — they do not invent commands.
 | Windows | `build-windows.ps1`       | `LakshX-Windows-<arch>.exe` |
 | Linux   | `build-linux.sh`          | `LakshX-Linux-<arch>.deb`   |
 
+## Just tell me the command (copy-paste, per OS)
+
+Run this from the repo root, on the machine matching your target OS.
+
+**macOS** — plain Terminal, `bash`/`zsh` both fine:
+
+```bash
+./build.sh
+```
+
+**Linux** — plain terminal, any shell:
+
+```bash
+./build.sh
+```
+
+**Windows** — the script is PowerShell (`.ps1`), **not** a `.sh` file, so how
+you invoke it depends on what you're typing into:
+
+- From a plain **PowerShell** or **cmd** prompt (most common — do this one):
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File OS-Build\build-windows.ps1
+  ```
+- From **Git Bash** only, `./build.sh` also works — it detects Windows and
+  invokes the `.ps1` for you automatically.
+
+Add `--check` (mac/linux) or `-Check` (Windows) to any of the above to run
+**only** the requirements gate and print the command sequence, with no actual
+build — use this first to see what's missing before committing to a real run.
+
+## Known issue right now: run this once before your first real build
+
+`product/lakshx-chat/package.json` lists `smart-whisper` (voice mode) as a
+dependency, but `package-lock.json` was never regenerated for it — the
+native-addon install was deliberately skipped during development (disk
+constraints). `npm ci` is strict and will **fail** on this mismatch during the
+`upstream: npm ci` step, on every OS, until the lockfile is fixed. One-time fix,
+on any machine with normal disk space and a working C++ toolchain:
+
+```bash
+cd product/lakshx-chat
+npm install        # regenerates package-lock.json (compiles the native addon)
+cd ../..
+```
+
+Commit the updated `package-lock.json` after this succeeds so nobody else hits
+the same failure. If you'd rather not build voice mode's native dependency at
+all right now, remove `smart-whisper` from `product/lakshx-chat/package.json`
+before running `npm install` — voice mode's UI will still load, it'll just fail
+gracefully with a clear error when someone tries to use the mic.
+
 ## Quick start
 
 From the repo root, on the machine matching your target OS:
