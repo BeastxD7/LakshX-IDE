@@ -34,16 +34,59 @@ neither one knows how to run a bash script, and you'll get either
 `'.' is not recognized as an internal or external command` (cmd) or nothing
 useful at all (PowerShell). Use one of these instead:
 
-- From a plain **PowerShell** or **cmd** prompt (most common — do this one):
+- From a plain **PowerShell** prompt (most common — do this one):
   ```powershell
-  powershell -ExecutionPolicy Bypass -File OS-Build\build-windows.ps1
+  powershell -ExecutionPolicy Bypass -NoProfile -File OS-Build\build-windows.ps1
   ```
 - From **Git Bash** (the `MINGW64` prompt) **only**, `./build.sh` also works —
   it detects Windows and invokes the `.ps1` for you automatically.
 
+That single command is fully hands-off **when the toolchain is already
+installed** — Node 24, VS Build Tools (C++), git. If any of those is missing,
+see [Windows from a clean machine](#windows-from-a-clean-machine-one-block-install--build)
+below for a one-block install-then-build. You do **not** need Git's `bin\` on
+your PATH — the script now finds `bash.exe` next to `git.exe` and adds it for
+the run automatically (Git for Windows only puts `cmd\` on PATH by default).
+
 Add `--check` (mac/linux) or `-Check` (Windows) to any of the above to run
 **only** the requirements gate and print the command sequence, with no actual
 build — use this first to see what's missing before committing to a real run.
+
+### Windows from a clean machine (one block, install → build)
+
+On a box with **nothing installed yet**, this repo was taken from zero to a
+build in one pass with `winget`. Paste this whole block into a plain
+**PowerShell** prompt at the repo root. It installs the three prerequisites,
+refreshes this shell's PATH from the registry so the just-installed Node/Python
+are visible **without reopening the terminal**, then runs the build:
+
+```powershell
+# 1. Prerequisites (approve the UAC prompt VS Build Tools raises)
+winget install OpenJS.NodeJS.LTS --version 24.18.0 -e --accept-package-agreements --accept-source-agreements
+winget install Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended" --accept-package-agreements --accept-source-agreements
+winget install Python.Python.3.12 -e --accept-package-agreements --accept-source-agreements
+
+# 2. Make this shell see the new installs (MSIs update the registry, not the live shell)
+$env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
+
+# 3. Build
+powershell -ExecutionPolicy Bypass -NoProfile -File OS-Build\build-windows.ps1
+```
+
+Notes from the validated run (2026-07-17, Windows 11):
+
+- **Node:** winget's plain `OpenJS.NodeJS` package only carries 25.x/26.x now,
+  which the gate **rejects** (it enforces "major 24, >= 24.17.0", exactly like
+  upstream's `preinstall.ts`). The **`OpenJS.NodeJS.LTS`** package is the 24.x
+  line — `24.18.0` satisfies the gate. Don't use the non-LTS package.
+- **Python** is only a `WARN` in the gate, but `npm ci` compiles native modules
+  with node-gyp, which needs it — installing it up front avoids a mid-build
+  failure. The gate's `python3` row may still read "not found" even after this,
+  because Windows' Store `python3.exe` alias shadows the real `python.exe`;
+  that's cosmetic (node-gyp uses `python`), and the script no longer crashes on
+  that alias.
+- **Reopening the terminal** instead of step 2 also works — a fresh shell reads
+  the updated PATH on its own. Step 2 just lets the block run start-to-finish.
 
 ## Known issue right now: run this once before your first real build
 
@@ -266,3 +309,28 @@ Signing/notarization is deliberately **not** implemented here — document only:
   this stalled on a slow/failing dependency download and was abandoned rather
   than block on it; this file is still **unverified against a live PowerShell
   parser**, only against the exact byte-level failure mode that was observed.
+- `build-windows.ps1`: **now run live under Windows PowerShell 5.1** (2026-07-17,
+  Windows 11) — this closes the "unverified against a live parser" gap above.
+  Two real bugs were found and fixed by driving an actual from-scratch build:
+  1. **Preflight crashed on the Windows Store `python3` alias.** With
+     `$ErrorActionPreference='Stop'`, invoking the `WindowsApps\python3.exe`
+     App-execution-alias stub (which only prints an install nag to stderr) threw
+     a `NativeCommandError` that aborted the **entire gate** — on a check that is
+     only ever a `WARN`. Fixed in `Check-Python`: the `WindowsApps\` alias is now
+     treated as "not found" (falls through to the WARN + install hint) and the
+     version probe is wrapped in try/catch. The gate now completes instead of
+     dying on any box without a real Python.
+  2. **`bash` check FAILed on machines that have Git but not Git's `bin\` on
+     PATH** — the default Git-for-Windows layout (only `cmd\`, holding
+     `git.exe`, is added to PATH; `bin\`, holding `bash.exe`, is not). Since the
+     prep phase shells out to `bash`, added `Ensure-BashOnPath`: when `bash`
+     isn't resolvable but `git` is, it derives `...\Git\bin` (or `...\Git\usr\bin`)
+     from `git.exe`'s location and adds it to **this process's** PATH only. The
+     `bash` check now PASSes and the build steps find bash without the user
+     touching their PATH.
+  After both fixes the requirements gate ran clean (**8 passed, 2 warnings, 0
+  failures**) and a full `-NonInteractive` build was launched on a machine
+  provisioned from zero (Node 24.18.0 LTS + VS 2022 Build Tools C++ + Python
+  3.12, all via `winget` — the exact one-block flow now documented above). The
+  script parses cleanly (`[Parser]::ParseFile` -> 0 errors) and remains pure
+  ASCII (0 bytes > 0x7F), so the em-dash class of bug cannot recur.

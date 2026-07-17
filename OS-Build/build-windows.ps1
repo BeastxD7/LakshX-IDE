@@ -58,6 +58,29 @@ function Write-Phase($msg) { Write-Host "`n==> [Windows] $msg" -ForegroundColor 
 function Write-Info($msg)  { Write-Host "    $msg" }
 function Die($msg) { Write-Host "ERROR: $msg" -ForegroundColor Red; exit 1 }
 
+# Git for Windows puts only its `cmd\` dir on PATH by default (that's where
+# git.exe lives) - NOT `bin\`, where bash.exe lives. So a machine can have Git
+# installed and pass the git check yet fail the bash check purely because bash
+# isn't on PATH. Since the prep phase shells out to `bash`, self-heal here:
+# if bash isn't resolvable but git is, add the sibling bin\ (git\cmd -> git\bin)
+# to THIS process's PATH so both the gate and the build steps just work. Only
+# touches $env:Path for this run; never changes system/user PATH.
+function Ensure-BashOnPath {
+	if (Get-Command bash -ErrorAction SilentlyContinue) { return }
+	$git = Get-Command git -ErrorAction SilentlyContinue
+	if (-not $git) { return }
+	# ...\Git\cmd\git.exe -> ...\Git ; try Git\bin then Git\usr\bin
+	$gitRoot = Split-Path -Parent (Split-Path -Parent $git.Source)
+	foreach ($sub in @('bin', 'usr\bin')) {
+		$cand = Join-Path $gitRoot $sub
+		if (Test-Path (Join-Path $cand 'bash.exe')) {
+			$env:Path = "$env:Path;$cand"
+			Write-Info "Added Git bash to PATH for this run: $cand"
+			return
+		}
+	}
+}
+
 # ----------------------------------------------------------------------------
 # Requirements gate - mirrors OS-Build/lib-preflight.sh (the bash builds) with
 # the SAME collect-all model, the SAME exact preinstall.ts Node check, and the
@@ -174,12 +197,20 @@ function Check-Bash {
 function Check-Python {
 	$py = Get-Command python3 -ErrorAction SilentlyContinue
 	if (-not $py) { $py = Get-Command python -ErrorAction SilentlyContinue }
+	# The Windows Store "App execution alias" stub lives under WindowsApps and is
+	# NOT a real Python - invoking it only prints an install nag to stderr (which,
+	# under $ErrorActionPreference='Stop', would otherwise abort the whole gate).
+	# Treat it as "not found" so we fall through to the WARN + install hint.
+	if ($py -and $py.Source -like '*\WindowsApps\*') { $py = $null }
 	$fixCmd = 'winget install Python.Python.3.12'; $fixKind = 'guided'; $fixPrompt = 'Install Python 3.12 now via winget? (guided) [y/N]'
 	if (-not $py) {
 		Pf-Warn 'python3' 'not found (node-gyp uses it for native modules)' 'Install python3 >= 3.10' $fixCmd $fixKind $fixPrompt
 		return
 	}
-	$pv = (& $py.Source -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>$null)
+	$pv = $null
+	try {
+		$pv = (& $py.Source -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>$null | Select-Object -First 1)
+	} catch { $pv = $null }
 	if ($pv) { $pv = "$pv".Trim() }
 	if (-not $pv) { Pf-Warn 'python3' 'present but version unreadable' 'Ensure python works' '' '' ''; return }
 	$p = Get-SemverParts $pv
@@ -337,6 +368,7 @@ if ($env:CI) { $Interactive = $false }
 try { if ([Console]::IsInputRedirected) { $Interactive = $false } } catch { }
 
 $script:PfRerunShell = $false
+Ensure-BashOnPath
 Invoke-WindowsGate
 $gateOk = Show-PfSummary
 if (-not $gateOk) {
