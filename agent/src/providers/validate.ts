@@ -19,6 +19,9 @@ export async function probeProvider(providerId: string, overrideKey?: string): P
   if (p.kind === "anthropic") {
     url = `${p.baseUrl}/v1/models?limit=100`;
     headers = { "x-api-key": key, "anthropic-version": "2023-06-01" };
+  } else if (p.kind === "azure") {
+    url = `${p.baseUrl}/models`;
+    headers = { "api-key": key };
   } else {
     url = `${p.baseUrl}/models`;
     headers = { authorization: `Bearer ${key}` };

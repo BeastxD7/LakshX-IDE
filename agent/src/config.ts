@@ -10,7 +10,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 export interface ProviderConfig {
-  kind: "anthropic" | "openai";
+  /** "azure" = Azure OpenAI/AI Foundry's v1 API surface: same chat/completions wire shape as "openai", but `api-key` auth instead of `Authorization: Bearer`, and `model` must be the Foundry deployment name, not the base model name. */
+  kind: "anthropic" | "openai" | "azure";
   baseUrl: string;
   apiKey?: string;
   /** extra headers, e.g. OpenRouter attribution */
@@ -32,7 +33,7 @@ export interface LakshXConfig {
 }
 
 /** Built-in presets: id → wire kind, base URL, API-key env var. */
-export const PRESETS: Record<string, { kind: "anthropic" | "openai"; baseUrl: string; envKey: string }> = {
+export const PRESETS: Record<string, { kind: "anthropic" | "openai" | "azure"; baseUrl: string; envKey: string }> = {
   anthropic:  { kind: "anthropic", baseUrl: "https://api.anthropic.com", envKey: "ANTHROPIC_API_KEY" },
   openai:     { kind: "openai", baseUrl: "https://api.openai.com/v1", envKey: "OPENAI_API_KEY" },
   openrouter: { kind: "openai", baseUrl: "https://openrouter.ai/api/v1", envKey: "OPENROUTER_API_KEY" },
@@ -43,6 +44,11 @@ export const PRESETS: Record<string, { kind: "anthropic" | "openai"; baseUrl: st
   gemini:     { kind: "openai", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", envKey: "GEMINI_API_KEY" },
   cerebras:   { kind: "openai", baseUrl: "https://api.cerebras.ai/v1", envKey: "CEREBRAS_API_KEY" },
   ollama:     { kind: "openai", baseUrl: "http://localhost:11434/v1", envKey: "OLLAMA_API_KEY" },
+  // BYOK Azure AI Foundry / Azure OpenAI, v1 API surface (resource-specific —
+  // baseUrl below is LakshX's own Foundry project, override per-user via
+  // ~/.lakshx/providers.json for a different resource). `model` must be set
+  // to the Foundry *deployment name*, e.g. "azure/gpt-4o-mini-deploy".
+  azure:      { kind: "azure", baseUrl: "https://lakshx-ide-global-resource.openai.azure.com/openai/v1", envKey: "AZURE_OPENAI_API_KEY" },
 };
 
 export function loadConfig(): LakshXConfig {

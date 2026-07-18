@@ -399,7 +399,7 @@ export function systemPrompt(cwd: string, mode: AgentMode, explainLanguage: Expl
   return [stable, rules, env].filter(Boolean).join("\n\n");
 }
 
-function makeAdapter(providerKind: "anthropic" | "openai", providerCfg: any): ChatAdapter {
+function makeAdapter(providerKind: "anthropic" | "openai" | "azure", providerCfg: any): ChatAdapter {
   return providerKind === "anthropic" ? new AnthropicAdapter(providerCfg) : new OpenAICompatAdapter(providerCfg);
 }
 

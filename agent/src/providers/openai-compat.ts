@@ -8,21 +8,37 @@ import { IMAGE_UNSUPPORTED_PLACEHOLDER, isVisionCapableModel } from "../vision.j
 import { sseLines, toolResultText } from "./types.js";
 import type { ChatAdapter, ChatMessage, ToolResultPart, TurnRequest, TurnResult } from "./types.js";
 
+// OpenAI's reasoning-model family (o1/o3/o4/gpt-5*) rejects `max_tokens`
+// outright ("Unsupported parameter... Use 'max_completion_tokens' instead")
+// — confirmed live against Azure's gpt-5-mini. Scoped narrowly to these
+// families rather than switching everyone to max_completion_tokens, since
+// some third-party OpenAI-compatible servers on this same adapter (Ollama,
+// LM Studio, etc.) may not recognize the newer key.
+function maxTokensParamName(model: string): "max_tokens" | "max_completion_tokens" {
+  const bare = model.replace(/^.*\//, ""); // strip any "provider/" prefix
+  return /^(o[1-9]|gpt-5)/i.test(bare) ? "max_completion_tokens" : "max_tokens";
+}
+
 export class OpenAICompatAdapter implements ChatAdapter {
   constructor(private cfg: ProviderConfig) {}
 
   async runTurn(req: TurnRequest): Promise<TurnResult> {
+    // Azure OpenAI/AI Foundry uses `api-key: <key>` instead of `Authorization:
+    // Bearer <key>` — everything else about the wire shape (chat/completions,
+    // SSE deltas, tool_calls) is identical to the rest of this adapter.
+    const authHeader: Record<string, string> =
+      this.cfg.kind === "azure" ? { "api-key": this.cfg.apiKey ?? "" } : { authorization: `Bearer ${this.cfg.apiKey}` };
     const res = await fetch(`${this.cfg.baseUrl}/chat/completions`, {
       method: "POST",
       signal: req.signal,
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${this.cfg.apiKey}`,
+        ...authHeader,
         ...this.cfg.headers,
       },
       body: JSON.stringify({
         model: req.model,
-        max_tokens: req.maxTokens ?? 8192,
+        [maxTokensParamName(req.model)]: req.maxTokens ?? 8192,
         messages: [{ role: "system", content: req.system }, ...toWire(req.messages, isVisionCapableModel(req.model))],
         tools: req.tools.map((t) => ({
           type: "function",
