@@ -34,14 +34,22 @@ export interface ChangelogEntry {
 // marker to the new latest commit hash once done.
 //
 // Known pre-existing gap (not introduced by this sync, not fixed by it —
-// flagging so it isn't missed): commit 5e0c861 ("Migrate hosted model to
-// Azure Responses API, add cloud feedback/audit telemetry, ship onboarding +
-// model-picker UX fixes", committer date 2026-07-19) is an ancestor of HEAD
-// and chronologically precedes the existing 2026-07-19 entries below, but
-// has no entry of its own — it looks genuinely user-facing and was missed
-// when those entries were added. A future sync should check it explicitly;
-// the range command above won't surface it since it's already behind the
-// marker.
+// flagging so it isn't missed): the range command above only shows commits
+// AFTER 1726bf0, but at least these commits at-or-before the marker have no
+// changelog entry of their own and looked genuinely user-facing on inspection:
+//   - 5e0c861 "Migrate hosted model to Azure Responses API, add cloud
+//     feedback/audit telemetry, ship onboarding + model-picker UX fixes"
+//     (2026-07-19) — precedes the existing 2026-07-19 entries below.
+//   - 413461f "docs: update for new features, add legal pages (terms,
+//     privacy, refund policy)" (2026-07-19) — new /terms, /privacy,
+//     /refund-policy pages plausibly deserve their own line.
+//   - 21b5931 "landing-page: per-model pricing prep for future Foundry
+//     model additions" (2026-07-19) — check if user-visible or purely prep.
+//   - 1726bf0 "refund-policy: switch to a strict no-refunds stance"
+//     (2026-07-19) — the marker commit itself; not yet reviewed for an entry.
+// A future sync should check each of these explicitly rather than trusting
+// that "1726bf0..HEAD" (or a later marker) covers everything — anything at
+// or before the marker is invisible to that command by construction.
 export const CHANGELOG_ENTRIES: ChangelogEntry[] = [
   { date: "2026-07-19", hash: "3184875", category: "Agent", text: "Automatic retry with backoff for transient provider errors (429/502/503/504) — a single Azure/Anthropic blip no longer fails the whole turn" },
   { date: "2026-07-19", hash: "5b58fb1", category: "UI", text: "Configurable push-to-talk hotkey for voice dictation (toggle-based, set from the settings panel)" },
