@@ -18,6 +18,16 @@ create table if not exists public.usage_ledger (
   created_at timestamptz not null default now()
 );
 create index if not exists usage_ledger_user_id_idx on public.usage_ledger(user_id);
+-- `model`: which hosted deployment served this request (e.g. "gpt-5-mini").
+-- Nullable + added after the fact via ALTER (not baked into the CREATE TABLE
+-- above) so this stays safely re-runnable against the already-live table.
+-- Existing rows predate this column and are simply null — that's fine, they
+-- were all gpt-5-mini anyway (there was only ever one hosted model until
+-- now). Added specifically so record_usage() can price correctly once a
+-- second Foundry model is deployed (see PRICE_PER_1M_BY_MODEL in both
+-- lakshx-model proxy routes) and so admin can see spend broken down by
+-- model once there's more than one to compare.
+alter table public.usage_ledger add column if not exists model text;
 
 create table if not exists public.user_budget (
   user_id uuid primary key references auth.users(id) on delete cascade,
@@ -138,15 +148,22 @@ $$;
 -- Post-request record: called by the proxy AFTER the stream ends, once
 -- actual token usage is known. Appends the ledger row and atomically bumps
 -- the global running total in the same statement set.
-create or replace function public.record_usage(p_user_id uuid, p_tokens_in bigint, p_tokens_out bigint, p_cost_usd numeric)
+-- Adding p_model as a genuinely new parameter changes this function's
+-- signature — `create or replace` only replaces a function with the EXACT
+-- SAME argument list, otherwise Postgres just adds a second overload
+-- alongside the old one. Drop the old 4-arg version explicitly first so
+-- there's never a stale duplicate overload silently sitting alongside this.
+drop function if exists public.record_usage(uuid, bigint, bigint, numeric);
+
+create or replace function public.record_usage(p_user_id uuid, p_tokens_in bigint, p_tokens_out bigint, p_cost_usd numeric, p_model text default null)
 returns void
 language plpgsql
 security definer
 set search_path = public
 as $$
 begin
-  insert into usage_ledger (user_id, tokens_in, tokens_out, cost_usd)
-    values (p_user_id, p_tokens_in, p_tokens_out, p_cost_usd);
+  insert into usage_ledger (user_id, tokens_in, tokens_out, cost_usd, model)
+    values (p_user_id, p_tokens_in, p_tokens_out, p_cost_usd, p_model);
   update global_budget set spent_usd = spent_usd + p_cost_usd where id = true;
 end;
 $$;
@@ -154,9 +171,9 @@ $$;
 -- Lock these down to the service role only — never callable with the
 -- anon/authenticated key, or any signed-in user could forge their own cost.
 revoke all on function public.check_budget(uuid, numeric) from public, anon, authenticated;
-revoke all on function public.record_usage(uuid, bigint, bigint, numeric) from public, anon, authenticated;
+revoke all on function public.record_usage(uuid, bigint, bigint, numeric, text) from public, anon, authenticated;
 grant execute on function public.check_budget(uuid, numeric) to service_role;
-grant execute on function public.record_usage(uuid, bigint, bigint, numeric) to service_role;
+grant execute on function public.record_usage(uuid, bigint, bigint, numeric, text) to service_role;
 
 -- Admin dashboard convenience view — per-user total spend + their cap.
 -- Also service-role only (no grants to anon/authenticated); the /admin

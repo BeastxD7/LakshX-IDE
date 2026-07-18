@@ -2,18 +2,12 @@ import { NextRequest } from "next/server";
 import { after } from "next/server";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { cleanAzureError } from "../../../../lib/upstream-error";
+import { computeCostUsd } from "../../../../lib/model-pricing";
 
 export const runtime = "nodejs";
 // Agentic turns can run long (multi-tool-call loops) — this is the ceiling
 // this stage needs.
 export const maxDuration = 300;
-
-// Azure OpenAI, gpt-5-mini, Global Standard, USD per 1M tokens. Update this
-// if the deployment's model/SKU ever changes — cost accounting is only as
-// correct as this constant. Kept identical to (and duplicated from) the
-// sibling chat/completions/route.ts — same model, same deployment, same
-// price, just a different Azure API surface.
-const PRICE_PER_1M = { input: 0.125, output: 1.0 };
 
 function supabaseAdmin(): SupabaseClient {
   return createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
@@ -125,7 +119,7 @@ export async function POST(req: NextRequest) {
   // `after()` keeps the function alive for this work even though the
   // response has already been returned — a bare unawaited promise here can
   // get killed by the platform once the response is sent.
-  after(() => recordUsageWhenDone(meterStream, supabase, userId));
+  after(() => recordUsageWhenDone(meterStream, supabase, userId, deployment));
 
   return new Response(clientStream, {
     status: 200,
@@ -133,7 +127,7 @@ export async function POST(req: NextRequest) {
   });
 }
 
-async function recordUsageWhenDone(stream: ReadableStream<Uint8Array>, supabase: SupabaseClient, userId: string) {
+async function recordUsageWhenDone(stream: ReadableStream<Uint8Array>, supabase: SupabaseClient, userId: string, model: string) {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let buf = "";
@@ -179,14 +173,14 @@ async function recordUsageWhenDone(stream: ReadableStream<Uint8Array>, supabase:
   // output tokens, not on top of them). Deliberately do NOT add
   // `usage.output_tokens_details.reasoning_tokens` here — that would
   // double-bill every request, not fix under-billing.
-  const costUsd =
-    (usage.input_tokens / 1_000_000) * PRICE_PER_1M.input + (usage.output_tokens / 1_000_000) * PRICE_PER_1M.output;
+  const costUsd = computeCostUsd(model, usage.input_tokens, usage.output_tokens);
 
   const { error } = await supabase.rpc("record_usage", {
     p_user_id: userId,
     p_tokens_in: usage.input_tokens,
     p_tokens_out: usage.output_tokens,
     p_cost_usd: costUsd,
+    p_model: model,
   });
   if (error) console.error("lakshx-model (responses): record_usage failed", error);
 }
