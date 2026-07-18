@@ -1,6 +1,10 @@
 import type { Metadata } from "next";
-import { Inter, Poppins, Playfair_Display } from "next/font/google";
+import { Inter, Poppins, Playfair_Display, Geist } from "next/font/google";
 import "./globals.css";
+import { cn } from "@/lib/utils";
+import { AdminThemeScope } from "@/components/admin/admin-theme-scope";
+
+const geist = Geist({subsets:['latin'],variable:'--font-sans'});
 
 const inter = Inter({
   subsets: ["latin"],
@@ -61,8 +65,11 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${inter.variable} ${poppins.variable} ${playfair.variable}`}>
-      <body>{children}</body>
+    <html lang="en" className={cn(inter.variable, poppins.variable, playfair.variable, "font-sans", geist.variable)}>
+      <body>
+        <AdminThemeScope />
+        {children}
+      </body>
     </html>
   );
 }

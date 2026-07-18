@@ -129,3 +129,18 @@ group by u.id, u.email, b.credit_limit_usd;
 
 revoke all on public.admin_user_usage from public, anon, authenticated;
 grant select on public.admin_user_usage to service_role;
+
+-- Admin dashboard convenience view — daily spend/request-count, for the
+-- spend-over-time chart. Aggregated in Postgres rather than pulling raw
+-- usage_ledger rows to the client, same service-role-only access pattern.
+create or replace view public.admin_daily_spend as
+select
+  date_trunc('day', created_at) as day,
+  sum(cost_usd) as cost_usd,
+  count(*) as requests
+from usage_ledger
+group by 1
+order by 1;
+
+revoke all on public.admin_daily_spend from public, anon, authenticated;
+grant select on public.admin_daily_spend to service_role;

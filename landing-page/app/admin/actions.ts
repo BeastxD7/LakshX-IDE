@@ -28,7 +28,7 @@ export async function updateUserCredit(formData: FormData) {
   const { error } = await admin.from("user_budget").upsert({ user_id: userId, credit_limit_usd: limit });
   if (error) throw new Error(error.message);
 
-  revalidatePath("/admin");
+  revalidatePath("/admin", "layout");
 }
 
 export async function updateGlobalCeiling(formData: FormData) {
@@ -40,5 +40,5 @@ export async function updateGlobalCeiling(formData: FormData) {
   const { error } = await admin.from("global_budget").update({ ceiling_usd: ceiling }).eq("id", true);
   if (error) throw new Error(error.message);
 
-  revalidatePath("/admin");
+  revalidatePath("/admin", "layout");
 }
