@@ -49,18 +49,17 @@ export interface DownloadTarget {
 /** Bump the value for a platform every time a new file is uploaded to its
  * (stable) blob path — see the cache-busting note above. */
 const BLOB_VERSION: Record<Exclude<DownloadKey, "macIntel">, string> = {
-  // Rebuilt from commit dc321d2 (CI run 29689445744) -- all three platforms,
-  // including the budget-cap friendly-error/upgrade-link fix, the per-model
-  // admin usage analytics, and the per-file checkpoint Accept/Reject/Undo
-  // controls. macOS CI only zips the raw .app (see this file's own doc
-  // comment above); the .dmg came from the same manual create-dmg.ts run
-  // this session already exercised (ad-hoc codesign + dmgbuild), applied to
-  // this run's freshly downloaded .app rather than reused from the prior
-  // upload. Same-day re-upload needs a genuinely distinct value each time,
+  // Rebuilt from commit b2d8118 (CI run 29694237364) -- all three platforms,
+  // including the hosted-model plan gate (Free tier locked to gpt-5-mini
+  // only; every other deployed model now requires Pro). macOS CI only zips
+  // the raw .app (see this file's own doc comment above); the .dmg came
+  // from the same manual create-dmg.ts run this session already exercised
+  // (ad-hoc codesign + dmgbuild), applied to this run's freshly downloaded
+  // .app. Same-day re-upload needs a genuinely distinct value each time,
   // not the same date reused, per the cache-busting note above.
-  macArm: "2026-07-19-4",
-  windows: "2026-07-19-3",
-  linux: "2026-07-19-3",
+  macArm: "2026-07-19-5",
+  windows: "2026-07-19-4",
+  linux: "2026-07-19-4",
 };
 
 const withVersion = (url: string, version: string) => `${url}?v=${version}`;
