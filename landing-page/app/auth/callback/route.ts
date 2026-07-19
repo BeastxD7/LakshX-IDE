@@ -17,10 +17,24 @@ export const runtime = "nodejs";
  * so failures are logged with a null user_id rather than dropped: this keeps
  * failure volume visible on the admin dashboard even though individual
  * failures can't be attributed to a person.
+ *
+ * Also now the landing point for the public /pricing "Upgrade" button (see
+ * app/pricing/actions.ts) — this route itself was never admin-specific,
+ * only the UI that used to be its sole caller was. `next` is untrusted
+ * input (an attacker can request any `next` value on the sign-in URL they
+ * get a victim to click); `safeNext()` below rejects anything that isn't a
+ * same-origin relative path so this can't be turned into an open redirect
+ * (`new URL("https://evil.example", req.url)` would otherwise happily
+ * redirect off-site after a real, successful sign-in).
  */
+function safeNext(next: string | null): string {
+  if (!next || !next.startsWith("/") || next.startsWith("//")) return "/admin";
+  return next;
+}
+
 export async function GET(req: NextRequest) {
   const code = req.nextUrl.searchParams.get("code");
-  const next = req.nextUrl.searchParams.get("next") ?? "/admin";
+  const next = safeNext(req.nextUrl.searchParams.get("next"));
   const admin = supabaseAdmin();
 
   if (code) {

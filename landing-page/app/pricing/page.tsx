@@ -1,9 +1,11 @@
 import Link from "next/link";
+import type { ReactNode } from "react";
 import { Check, ArrowUpRight } from "lucide-react";
 import Logo from "../components/Logo";
 import CtaButton from "../components/CtaButton";
 import SectionGlow from "../components/SectionGlow";
 import SiteFooter from "../components/SiteFooter";
+import { UpgradeButton } from "../../components/pricing/UpgradeButton";
 
 export const metadata = {
   title: "Pricing — LakshX",
@@ -59,6 +61,7 @@ function PlanCard({
   items,
   featured = false,
   badge,
+  cta,
 }: {
   name: string;
   tagline: string;
@@ -67,6 +70,8 @@ function PlanCard({
   items: string[];
   featured?: boolean;
   badge?: string;
+  /** Real, plan-specific CTA (e.g. Pro's UpgradeButton) — falls back to a disabled "Coming soon" button when omitted, so a plan with no working checkout yet never LOOKS like it has one. */
+  cta?: ReactNode;
 }) {
   return (
     <div
@@ -97,9 +102,11 @@ function PlanCard({
         ))}
       </ul>
 
-      <CtaButton variant={featured ? "accent" : "outline"} size="lg" disabled className="mt-8 w-full">
-        Coming soon
-      </CtaButton>
+      {cta ?? (
+        <CtaButton variant={featured ? "accent" : "outline"} size="lg" disabled className="mt-8 w-full">
+          Coming soon
+        </CtaButton>
+      )}
     </div>
   );
 }
@@ -145,7 +152,15 @@ export default function PricingPage() {
 
           <div className="mt-16 grid gap-6 lg:grid-cols-3">
             <PlanCard name="Free" tagline="For BYOK users, and anyone getting started" price="$0" priceNote="forever" items={FREE_ITEMS} />
-            <PlanCard name="Pro" tagline="For daily use on the hosted model" price="$15" priceNote="/ month" items={PRO_ITEMS} featured badge="Coming soon" />
+            <PlanCard
+              name="Pro"
+              tagline="For daily use on the hosted model"
+              price="$15"
+              priceNote="/ month"
+              items={PRO_ITEMS}
+              featured
+              cta={<UpgradeButton />}
+            />
             <PlanCard
               name="Pro+"
               tagline="For premium models — Grok 4, GPT-5, Claude Sonnet 5, Opus"
