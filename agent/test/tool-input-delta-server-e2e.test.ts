@@ -128,8 +128,8 @@ test("lakshx/tool_input_delta streams write_file's content live through the real
   } finally {
     child.kill();
     await fake.stop();
-    await rm(home, { recursive: true, force: true });
-    await rm(workspace, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(workspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     if (process.exitCode && childStderr) console.error("--- server stderr ---\n" + childStderr);
   }
 });

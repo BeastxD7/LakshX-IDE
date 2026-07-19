@@ -232,8 +232,8 @@ test("prompt checkpoints + undo — round trip, per-file isolation, overlap, con
   } finally {
     child.kill();
     await fake.stop();
-    await rm(home, { recursive: true, force: true });
-    await rm(workspace, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(workspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     if (process.exitCode && childStderr) console.error("--- server stderr ---\n" + childStderr);
   }
 });
@@ -324,8 +324,8 @@ test("royal mode: tool calls also fire lakshx/checkpoint (files-changed UI parit
   } finally {
     child.kill();
     await fake.stop();
-    await rm(home, { recursive: true, force: true });
-    await rm(workspace, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(workspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     if (process.exitCode && childStderr) console.error("--- server stderr ---\n" + childStderr);
   }
 });
@@ -458,7 +458,7 @@ test("crash mid-checkpoint: killing the server during a mutating tool call never
     }
   } finally {
     await fake.stop();
-    await rm(home, { recursive: true, force: true });
-    await rm(workspace, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(workspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });

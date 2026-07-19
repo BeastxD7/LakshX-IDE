@@ -492,8 +492,8 @@ test("lakshx agent e2e over ACP against a scripted provider", { timeout: 120_000
   } finally {
     child.kill();
     await fake.stop();
-    await rm(home, { recursive: true, force: true });
-    await rm(workspace, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(workspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     if (process.exitCode && childStderr) console.error("--- server stderr ---\n" + childStderr);
   }
 });

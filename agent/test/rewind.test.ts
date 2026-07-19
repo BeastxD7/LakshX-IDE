@@ -200,7 +200,16 @@ test("lakshx/rewind_to_prompt: multi-prompt revert + truncate, external-edit con
   } finally {
     child.kill();
     await fake.stop();
-    await rm(home, { recursive: true, force: true });
-    await rm(workspace, { recursive: true, force: true });
+    // maxRetries/retryDelay: `child.kill()` sends SIGTERM but does not wait
+    // for the process to actually exit — if it was mid-write on a debounced
+    // session save (see `saveSessionSoon` above) when killed, its file
+    // handle under `home` can still be closing when `rm` walks the tree,
+    // racing a transient ENOTEMPTY (confirmed live on a GitHub Actions
+    // runner, 2026-07-19 — same failure class as checkpoint.test.ts's fix
+    // earlier this session). Node's own `rm` retry option is built for
+    // exactly this transient-handle-release race; a fixed extra delay before
+    // calling `rm` would just be guessing at a number instead.
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(workspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });

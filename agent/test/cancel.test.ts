@@ -133,8 +133,8 @@ test(
     } finally {
       child.kill();
       await fake.stop();
-      await rm(home, { recursive: true, force: true });
-      await rm(workspace, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      await rm(workspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       if (childStderr) console.error("--- server stderr ---\n" + childStderr);
     }
   },
@@ -241,8 +241,8 @@ test(
     } finally {
       process.env.HOME = realHome;
       await fake.stop();
-      await rm(home, { recursive: true, force: true });
-      await rm(workspace, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      await rm(workspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   },
 );
