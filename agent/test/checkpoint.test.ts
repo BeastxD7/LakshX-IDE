@@ -382,17 +382,28 @@ test("crash mid-checkpoint: killing the server during a mutating tool call never
       })
       .catch(() => {}); // the connection itself dies with the child — expected
 
-    // give the baseline commit (which runs synchronously before the sleep)
+    // Give the baseline commit (which runs synchronously before the sleep)
     // time to actually land, then kill mid-sleep — squarely inside the
-    // "baseline exists, tool commit does not yet" crash window
-    await new Promise((r) => setTimeout(r, 600));
+    // "baseline exists, tool commit does not yet" crash window. POLL for the
+    // actual precondition instead of a fixed sleep: a hardcoded guess here
+    // (previously 600ms) is exactly what made this test flaky specifically
+    // on CI — confirmed reproducing reliably in GitHub Actions even though
+    // it's solid on a local dev machine, since server startup + session
+    // creation + the baseline commit itself can legitimately take longer
+    // than any one fixed guess under a shared/loaded runner's resource
+    // contention. Waiting for the real event removes the guess entirely.
+    const gitDir = shadowGitDirFor(home, workspace);
+    const baselineDeadline = Date.now() + 10_000;
+    while (!existsSync(gitDir) && Date.now() < baselineDeadline) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.ok(existsSync(gitDir), "baseline commit never landed within 10s — can't exercise the crash window at all");
     child1.kill("SIGKILL");
     await new Promise((r) => setTimeout(r, 300));
     await connectPromise; // settles quickly once the child (and stream) are gone
 
-    // --- assert the shadow repo survived: still a valid, parseable git repo ---
-    const gitDir = shadowGitDirFor(home, workspace);
-    assert.ok(existsSync(gitDir), "shadow repo must exist (the baseline commit ran before the kill)");
+    // --- assert the shadow repo survived the kill: still a valid, parseable git repo ---
+    assert.ok(existsSync(gitDir), "shadow repo must still exist after the kill");
     await execFileAsync("git", [`--git-dir=${gitDir}`, "fsck", "--no-progress"]); // throws if corrupt
     await execFileAsync("git", [`--git-dir=${gitDir}`, "log", "-1"]); // throws if unparseable/no valid HEAD
 
