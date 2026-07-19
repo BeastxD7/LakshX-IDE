@@ -11,7 +11,7 @@ import * as acp from "@agentclientprotocol/sdk";
 import { maybeCompact, readFileAtCommit, undoFile, undoPaths } from "./checkpoint.js";
 import { availableProviders, loadConfig } from "./config.js";
 import { normalizeExplainLanguage, runPrompt, toolTitle, type AgentMode, type AgentSession } from "./loop.js";
-import { toolResultText } from "./providers/types.js";
+import { BUDGET_CAP_SENTINEL, SESSION_EXPIRED_SENTINEL, toolResultText } from "./providers/types.js";
 import { probeProvider } from "./providers/validate.js";
 import { loadSessionFile, pruneSessions, saveSessionSoon, type PromptCheckpoint, type PromptMarker } from "./store.js";
 import { backgroundTasks, formatTaskNotifications } from "./tasks.js";
@@ -480,6 +480,39 @@ const agentApp = acp
       return { stopReason: abort.signal.aborted ? "cancelled" : stop };
     } catch (err: any) {
       if (abort.signal.aborted) return { stopReason: "cancelled" };
+      // Sentinel-prefixed errors (session-expired, budget-cap) carry a
+      // client-actionable message that extension.js's own session/prompt
+      // catch already has dedicated handling for (distinct system-message
+      // styling, an "Upgrade" link, etc.) — that handling only ever runs on
+      // a REJECTED session/prompt request. Every other error below is
+      // deliberately swallowed into a normal agent_message_chunk instead
+      // (so a stray provider hiccup reads as the assistant's own text, not
+      // a scary failure banner) — but doing that unconditionally here, for
+      // a sentinel-prefixed error too, silently ate the sentinel: the raw
+      // "__LAKSHX_BUDGET_CAP__:" prefix rendered straight into the chat
+      // (and its double underscores parsed as markdown bold, stripping
+      // them — confirmed live). Re-throwing here instead lets the ACP
+      // connection layer convert it into a real JSON-RPC error response,
+      // which is the ONLY way extension.js's existing sentinel checks ever
+      // actually fire.
+      //
+      // MUST be a real `acp.RequestError`, not a plain re-thrown `err` —
+      // confirmed by reading the SDK's own `errorToResult()`
+      // (jsonrpc.js): a plain `Error` is NOT passed through as-is. The SDK
+      // tries `JSON.parse(err.message)` (apparently assuming a thrown
+      // Error's message is meant to be structured data), and on a normal
+      // English message that parse throws, so it falls back to a
+      // `RequestError.internalError({ details: err.message })` — which
+      // hardcodes `.message` to the literal string "Internal error" and
+      // buries the real text inside `.data.details` instead, a field
+      // acp-client.js's `p.reject(new Error(msg.error.message))` never
+      // reads. `RequestError` is the one type this SDK passes through
+      // untouched (`.toResult()` keeps its own `.message` verbatim) — this
+      // was only found by tracing a failing regression test, not by
+      // inspection alone.
+      if (err?.message?.startsWith(SESSION_EXPIRED_SENTINEL) || err?.message?.startsWith(BUDGET_CAP_SENTINEL)) {
+        throw new acp.RequestError(-32603, err.message);
+      }
       await notify({
         sessionUpdate: "agent_message_chunk",
         content: { type: "text", text: `\n\nError: ${err?.message ?? err}` },

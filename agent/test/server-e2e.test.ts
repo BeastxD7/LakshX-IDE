@@ -102,6 +102,12 @@ test("lakshx agent e2e over ACP against a scripted provider", { timeout: 120_000
       defaultModel: "fake/test-model",
       providers: {
         fake: { kind: "openai", baseUrl: `http://127.0.0.1:${fake.port}/v1`, apiKey: "test-key-123" },
+        // Same fake HTTP server, different baseUrl — openai-compat.ts's
+        // budget-cap detection is gated on the URL matching
+        // LAKSHX_PROXY_BASE_URL_RE (`/api/lakshx-model` suffix), not on
+        // provider identity, so this is the only thing that needs to differ
+        // to exercise that path against a scripted 429.
+        lakshxProxy: { kind: "openai", baseUrl: `http://127.0.0.1:${fake.port}/api/lakshx-model`, apiKey: "test-key-123" },
       },
     }),
   );
@@ -150,7 +156,7 @@ test("lakshx agent e2e over ACP against a scripted provider", { timeout: 120_000
         await t.test("lakshx/models reports default model and configured providers", async () => {
           const models = await ctx.request<{ defaultModel: string; providers: string[] }>("lakshx/models", {});
           assert.equal(models.defaultModel, "fake/test-model");
-          assert.deepEqual(models.providers, ["fake"]); // only our keyed provider; ollama gated off
+          assert.deepEqual(models.providers, ["fake", "lakshxProxy"]); // our two keyed providers; ollama gated off
         });
 
         await t.test("review mode: dangerous tool is blocked, plan triggers lakshx/plan_ready", () =>
@@ -295,6 +301,47 @@ test("lakshx agent e2e over ACP against a scripted provider", { timeout: 120_000
               const r = await runTurn(session, "hello again"); // no scripted turn needed — never reaches provider
               assert.equal(r.response.stopReason, "refusal");
               assert.match(messageText(r.updates), /Unknown provider "nope"/);
+            });
+
+            await t2.test("hosted-proxy 429 budget cap rejects session/prompt with the sentinel-prefixed message intact, not a swallowed chat chunk", async () => {
+              // Regression test for TWO stacked bugs, both found only by
+              // tracing a live failure (lakshx.in), not by inspection:
+              //   1. server.ts's session/prompt catch used to swallow EVERY
+              //      runPrompt error (including a BUDGET_CAP_SENTINEL-
+              //      prefixed one) into a normal agent_message_chunk and a
+              //      successful "refusal" stopReason — the sentinel string
+              //      rendered straight into the chat (its double underscores
+              //      eaten by markdown-bold parsing client-side) instead of
+              //      ever reaching extension.js's dedicated sentinel
+              //      handling, which only runs on a REJECTED request.
+              //   2. Fixing #1 by re-throwing the plain Error surfaced a
+              //      SEPARATE SDK behavior: @agentclientprotocol/sdk's
+              //      errorToResult() only preserves `.message` verbatim for
+              //      a real `RequestError` instance — a plain `Error` gets
+              //      its message replaced with the literal string "Internal
+              //      error" (the SDK tries to JSON.parse the message as
+              //      structured data first). server.ts must throw
+              //      `new acp.RequestError(...)`, not the bare caught error.
+              // This test only covers the agent-process <-> ACP-client
+              // boundary — it deliberately does NOT assert the sentinel is
+              // STRIPPED, since that happens one layer up, in
+              // product/lakshx-chat/extension.js's own catch (plain
+              // `.slice()`, not covered by this test suite).
+              await ctx.request("lakshx/set_model", { sessionId: session.sessionId, model: "lakshxProxy/whatever-model" });
+              // 3 copies: fetchWithRetry (providers/types.ts) treats 429 as
+              // retryable up to maxAttempts=3 — a single queued error gets
+              // consumed by the first attempt, and the retry falls through
+              // to "script exhausted" instead of the budget-cap path this
+              // test means to exercise. See enqueueHttpError's doc comment.
+              fake.enqueueHttpError(429, { error: "user_cap_reached" }, 3);
+              await assert.rejects(() => session.prompt("hello"), (err: any) => {
+                assert.match(err.message, /^__LAKSHX_BUDGET_CAP__:/);
+                assert.match(err.message, /You've used your free \$5 of hosted model credit/);
+                assert.match(err.message, /\[Upgrade →\]\(https:\/\/lakshx\.in\/pricing\)/);
+                assert.notEqual(err.message, "Internal error");
+                return true;
+              });
+              await ctx.request("lakshx/set_model", { sessionId: session.sessionId, model: "fake/test-model" });
             });
 
             await t2.test("auto mode: destructive-command floor hard-blocks force-push — no permission prompt, no execution", async () => {

@@ -45,12 +45,33 @@ export class FakeOpenAI {
   private continuousScript: Array<{ intervalMs: number; factory: (i: number) => SseEvent }> = [];
   private activeIntervals: Set<ReturnType<typeof setInterval>> = new Set();
   private matchedScript: Array<{ match: (req: RecordedRequest) => boolean; turn: ScriptedTurn; delayMs: number }> = [];
+  private httpErrorScript: Array<{ status: number; body: unknown }> = [];
   private server: Server | undefined;
 
   /** Queue one or more turns; each request consumes one turn FIFO. */
   enqueue(...turns: ScriptedTurn[]): void {
     this.script.push(...turns);
     for (const _ of turns) this.scriptDelays.push(0);
+  }
+
+  /**
+   * Queue a plain non-200 JSON response (not an SSE stream at all) for the
+   * next `times` requests — e.g. the hosted lakshx proxy's
+   * `429 {error: "reason"}` shape (see landing-page/app/api/lakshx-model's
+   * route handlers). Checked before the SSE script queues below since a
+   * real error response never has a `content-type: text/event-stream` body.
+   *
+   * `times` defaults to 1, but a 429/502/503/504 is one of
+   * `fetchWithRetry`'s own `RETRYABLE_STATUSES` (providers/types.ts) — the
+   * client-side adapter silently retries up to its `maxAttempts` (3) before
+   * ever surfacing the response to the caller. A test asserting on a 429's
+   * effect must queue enough copies to survive every retry, or the LAST
+   * attempt falls through to "script exhausted" instead (confirmed live:
+   * this exact one-copy mistake made a real regression test pass for the
+   * wrong reason).
+   */
+  enqueueHttpError(status: number, body: unknown, times = 1): void {
+    for (let i = 0; i < times; i++) this.httpErrorScript.push({ status, body });
   }
 
   /**
@@ -123,6 +144,13 @@ export class FakeOpenAI {
         this.requests.push(parsed);
         this.authHeaders.push(req.headers.authorization);
         this.requestTimestamps.push(Date.now());
+
+        const httpError = this.httpErrorScript.shift();
+        if (httpError) {
+          res.writeHead(httpError.status, { "content-type": "application/json" });
+          res.end(JSON.stringify(httpError.body));
+          return;
+        }
 
         const stall = this.stallScript.shift();
         if (stall) {
