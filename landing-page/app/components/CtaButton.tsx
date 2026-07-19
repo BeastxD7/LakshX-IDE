@@ -1,7 +1,7 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 
-type Variant = "primary" | "glass";
+type Variant = "primary" | "glass" | "outline" | "accent";
 type Size = "sm" | "md" | "lg";
 
 const base =
@@ -20,6 +20,16 @@ const variantClass: Record<Variant, string> = {
     "bg-gradient-to-r from-lakshx-violet to-lakshx-violet-active text-white shadow-lg shadow-lakshx-violet/30 hover:brightness-110 focus:ring-lakshx-violet/40",
   glass:
     "border border-white/30 bg-white/10 text-white backdrop-blur-md hover:bg-white/20 focus:ring-white/40",
+  // Same shape/weight as `glass`, recolored for the white/light sections
+  // below the hero — a bordered, near-transparent ink-navy chip instead of
+  // white-on-photo.
+  outline:
+    "border border-ink-navy/15 bg-ink-navy/[0.04] text-ink-navy hover:bg-ink-navy/[0.08] focus:ring-lakshx-violet/30",
+  // The pink/green gradient equivalent of `primary`, for CTAs inside the
+  // white/light sections below the hero — keeps that content deliberately
+  // off the hero's violet accent (see Features/Pricing).
+  accent:
+    "bg-gradient-to-r from-pink-500 to-emerald-500 text-white shadow-lg shadow-pink-500/20 hover:brightness-110 focus:ring-pink-400/40",
 };
 
 interface CtaButtonProps {
