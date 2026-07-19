@@ -271,7 +271,7 @@ export const CHANGELOG_ENTRIES: ChangelogEntry[] = [
   { date: "2026-07-18", hash: "df962e5", category: "Security", text: "Replace magic-link login with Google OAuth for both the IDE's /login and the /admin dashboard — the lakshx:// deep-link handler needed no changes since it just parses whatever tokens land in the callback" },
 ];
 
-export const REPO_URL = "https://github.com/BeastxD7/koder";
+export const REPO_URL = "https://github.com/BeastxD7/LakshX-IDE";
 
 /**
  * Optional per-date phase framing, lifted from docs/architecture.md §11
