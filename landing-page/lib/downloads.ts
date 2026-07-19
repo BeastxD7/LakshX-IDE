@@ -49,12 +49,14 @@ export interface DownloadTarget {
 /** Bump the value for a platform every time a new file is uploaded to its
  * (stable) blob path — see the cache-busting note above. */
 const BLOB_VERSION: Record<Exclude<DownloadKey, "macIntel">, string> = {
-  // "-2": re-uploaded same day (commit 609c2b7) after the first 2026-07-19
-  // upload — a same-day re-upload needs a genuinely distinct value, not the
-  // same date reused, per the cache-busting note above.
-  macArm: "2026-07-19-2",
-  windows: "2026-07-19",
-  linux: "2026-07-19",
+  // Rebuilt from commit d555a37 (CI run 29685210756) -- all three platforms
+  // from the same verified build, including the Dodo integration, pricing
+  // page, admin panel, 9 new hosted models, and the flaky-test fixes from
+  // this session. Same-day re-upload needs a genuinely distinct value each
+  // time, not the same date reused, per the cache-busting note above.
+  macArm: "2026-07-19-3",
+  windows: "2026-07-19-2",
+  linux: "2026-07-19-2",
 };
 
 const withVersion = (url: string, version: string) => `${url}?v=${version}`;
