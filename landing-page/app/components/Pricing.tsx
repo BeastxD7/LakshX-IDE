@@ -81,7 +81,7 @@ export default function Pricing() {
             <ul className="mt-8 flex flex-1 flex-col gap-3.5">
               {FREE_ITEMS.map((item) => (
                 <li key={item} className="flex items-start gap-2.5 text-sm text-ink-navy/70">
-                  <Check className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" aria-hidden="true" />
+                  <Check className="mt-0.5 h-4 w-4 shrink-0 text-lakshx-violet" aria-hidden="true" />
                   {item}
                 </li>
               ))}
@@ -92,25 +92,27 @@ export default function Pricing() {
             </CtaButton>
           </motion.div>
 
-          {/* Pro plan */}
+          {/* Pro plan — light-themed like Free, distinguished by a violet
+              ring/wash instead of a dark card, so the page stays consistently
+              light end to end (no dark-mode-looking panel). */}
           <motion.div
             variants={fadeUp}
-            className="relative flex flex-col rounded-3xl border border-pink-400/20 bg-ink-navy p-8 text-white shadow-xl sm:p-10"
+            className="relative flex flex-col rounded-3xl border border-lakshx-violet/25 bg-gradient-to-b from-lakshx-violet-active/15 to-white p-8 text-ink-navy shadow-xl ring-1 ring-lakshx-violet/15 sm:p-10"
           >
-            <span className="absolute -top-3 right-8 rounded-full bg-gradient-to-r from-pink-500 to-emerald-500 px-3 py-1 text-xs font-semibold text-white shadow-md">
+            <span className="absolute -top-3 right-8 rounded-full bg-gradient-to-r from-lakshx-violet-active to-lakshx-violet px-3 py-1 text-xs font-semibold text-white shadow-md">
               Coming soon
             </span>
-            <h3 className="font-heading text-xl font-semibold">Pro</h3>
-            <p className="mt-1 text-sm text-white/50">For daily use on the hosted model</p>
+            <h3 className="font-heading text-xl font-semibold text-ink-navy">Pro</h3>
+            <p className="mt-1 text-sm text-ink-navy/50">For daily use on the hosted model</p>
             <div className="mt-6 flex items-baseline gap-1">
-              <span className="font-heading text-4xl font-bold tracking-tight">$15</span>
-              <span className="text-sm text-white/50">/ month</span>
+              <span className="font-heading text-4xl font-bold tracking-tight text-ink-navy">$15</span>
+              <span className="text-sm text-ink-navy/50">/ month</span>
             </div>
 
             <ul className="mt-8 flex flex-1 flex-col gap-3.5">
               {PRO_ITEMS.map((item) => (
-                <li key={item} className="flex items-start gap-2.5 text-sm text-white/75">
-                  <Check className="mt-0.5 h-4 w-4 shrink-0 text-pink-300" aria-hidden="true" />
+                <li key={item} className="flex items-start gap-2.5 text-sm text-ink-navy/70">
+                  <Check className="mt-0.5 h-4 w-4 shrink-0 text-lakshx-violet" aria-hidden="true" />
                   {item}
                 </li>
               ))}

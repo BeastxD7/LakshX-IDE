@@ -25,11 +25,11 @@ const variantClass: Record<Variant, string> = {
   // white-on-photo.
   outline:
     "border border-ink-navy/15 bg-ink-navy/[0.04] text-ink-navy hover:bg-ink-navy/[0.08] focus:ring-lakshx-violet/30",
-  // The pink/green gradient equivalent of `primary`, for CTAs inside the
-  // white/light sections below the hero — keeps that content deliberately
-  // off the hero's violet accent (see Features/Pricing).
+  // Same brand violet as `primary`, reversed direction — used on the dark
+  // Pro pricing card below the hero, where a light-on-dark gradient reads
+  // best (see Pricing.tsx).
   accent:
-    "bg-gradient-to-r from-pink-500 to-emerald-500 text-white shadow-lg shadow-pink-500/20 hover:brightness-110 focus:ring-pink-400/40",
+    "bg-gradient-to-r from-lakshx-violet-active to-lakshx-violet text-white shadow-lg shadow-lakshx-violet/30 hover:brightness-110 focus:ring-lakshx-violet/40",
 };
 
 interface CtaButtonProps {
