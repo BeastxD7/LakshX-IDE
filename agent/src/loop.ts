@@ -290,6 +290,37 @@ const MAX_SUBTASK_DEPTH = 1;
 
 const IDENTITY = `You are LakshX, the agent inside the LakshX IDE — an agentic development environment whose whole purpose is SHIPPED SOFTWARE QUALITY.`;
 
+/**
+ * Appends a model-identity directive when the actual resolved model string
+ * is known (every real call site has one — only tests that don't care about
+ * this omit it, which is why the parameter is optional and the base
+ * `IDENTITY` string alone is returned unchanged when absent, preserving
+ * every existing test's exact expected output).
+ *
+ * Why this exists: models have no real introspective access to their own
+ * weights/training/architecture, so "what model are you?" is answered by
+ * pattern-completion, not genuine self-knowledge — and the single most
+ * common pattern in any large training corpus for "an AI model's name" is
+ * "ChatGPT"/"GPT-4"/"o1", because those are the most-discussed AI systems
+ * on the entire internet. Confirmed live: the SAME session asking the SAME
+ * question repeatedly got ChatGPT, o1-preview, o1-mini, GPT-4, and (once)
+ * the correct answer, across models that have zero actual relationship to
+ * OpenAI (Kimi, in that instance) — the flip-flopping itself is the
+ * signature of confabulation, not a real fact being reported. A generic
+ * "you are LakshX" instruction competes with that strong prior and loses
+ * often; explicitly naming the ACTUAL current model (known for certain,
+ * server-side, at request time) and explicitly naming the wrong answers to
+ * avoid gives the model much less room to default back to its prior.
+ * Still not a hard guarantee for every model's instruction-following, but
+ * meaningfully more reliable than the bare identity line alone.
+ */
+function identityBlock(model?: string): string {
+  if (!model) return IDENTITY;
+  return `${IDENTITY}
+
+Your underlying model for this session is "${model}". If asked what model, AI, or LLM you are, or what you are "powered by"/"built on"/your "base model", answer using exactly that identifier (e.g. "I'm LakshX, powered by ${model}"). Do not say GPT-4, ChatGPT, o1, o1-preview, o1-mini, Claude, or any other AI product name unless it is the exact string above — you have no way to introspect your own weights or training, so any other specific model name you might otherwise produce is confabulated, not true.`;
+}
+
 const PRINCIPLES = `Operating principles:
 1. Gather context before acting: read the relevant files, grep for usages, understand conventions. Never guess file contents.
 2. Act with the smallest correct change. Match the codebase's existing style, naming, and idioms.
@@ -404,8 +435,8 @@ CURRENT MODE: APPROVE — the harness asks the user for permission on writes/com
  * of the stable section (after ANTI_INJECTION) — preserving every other
  * block's relative order and cache prefix untouched.
  */
-export function systemPrompt(cwd: string, mode: AgentMode, explainLanguage: ExplainLanguage = "english"): string {
-  const stableParts = [IDENTITY, PRINCIPLES, TOOL_GUIDANCE, modeBlock(mode), ANTI_INJECTION];
+export function systemPrompt(cwd: string, mode: AgentMode, explainLanguage: ExplainLanguage = "english", model?: string): string {
+  const stableParts = [identityBlock(model), PRINCIPLES, TOOL_GUIDANCE, modeBlock(mode), ANTI_INJECTION];
   if (explainLanguage !== "english") stableParts.push(explainLanguageBlock(explainLanguage));
   const stable = stableParts.join("\n\n");
   const rules = loadRules(cwd);
@@ -1547,7 +1578,7 @@ async function runPromptLoop(
 
     // computed once per iteration and reused for the fallback token estimate
     // below — systemPrompt() shells out to git, no need to pay that twice
-    const prompt = systemPrompt(session.cwd, session.mode, session.explainLanguage);
+    const prompt = systemPrompt(session.cwd, session.mode, session.explainLanguage, model);
 
     // One generation span per adapter.runTurn() call (docs/architecture.md
     // §10 item 1). `summarizeText` (audit.ts) caps the system-prompt input
