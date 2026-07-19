@@ -3,7 +3,7 @@ import { after } from "next/server";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { cleanAzureError } from "../../../../lib/upstream-error";
 import { computeCostUsd } from "../../../../lib/model-pricing";
-import { RESPONSES_API_MODELS, DEFAULT_MODEL, getEffectivePlan, isModelAllowedForPlan } from "../../../../lib/hosted-models";
+import { RESPONSES_API_MODELS, DEFAULT_MODEL, getEffectivePlan, getRequiredPlan, isPlanSufficient } from "../../../../lib/hosted-models";
 
 export const runtime = "nodejs";
 // Agentic turns can run long (multi-tool-call loops) — this is the ceiling
@@ -92,9 +92,10 @@ export async function POST(req: NextRequest) {
   // Plan gate — see the identical block in the sibling chat/completions
   // route.ts for the full reasoning (found missing live: gpt-5-4-mini is
   // Pro-only same as every Chat-Completions model here, but nothing ever
-  // checked that on this route either).
-  const plan = await getEffectivePlan(supabase, userId);
-  if (!isModelAllowedForPlan(deployment, plan)) {
+  // checked that on this route either). Required plan is admin-configured
+  // (hosted_model_plans, editable at /admin/models), never hardcoded.
+  const [plan, requiredPlan] = await Promise.all([getEffectivePlan(supabase, userId), getRequiredPlan(supabase, deployment)]);
+  if (!isPlanSufficient(plan, requiredPlan)) {
     return Response.json({ error: "model_requires_pro", model: deployment }, { status: 403 });
   }
 

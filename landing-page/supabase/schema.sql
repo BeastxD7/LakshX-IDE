@@ -869,3 +869,49 @@ begin
   end if;
 end;
 $$;
+
+-- -----------------------------------------------------------------------------
+-- Admin-configurable per-model plan gate (docs/research: "which model goes to
+-- pro and which goes to free... it might be dynamic based on admin's choice").
+-- Replaces the hosted-model proxy routes' old hardcoded FREE_TIER_MODELS
+-- constant (found live: a Free user could select and bill against ANY
+-- deployed model, not just gpt-5-mini) with an admin-editable table, so
+-- moving a model between tiers is an admin-panel action, not a code+redeploy
+-- cycle. `required_plan` intentionally matches user_subscription.plan's
+-- check constraint values exactly (only 'free'/'pro' exist today) — adding a
+-- third tier later means widening BOTH check constraints together, not
+-- introducing a new comparison scheme.
+--
+-- No row for a given model = fail CLOSED to 'pro' (see landing-page/lib/
+-- hosted-models.ts's getRequiredPlan) — a newly-deployed-but-not-yet-
+-- configured model is never accidentally Free-accessible by omission.
+create table if not exists public.hosted_model_plans (
+  model text primary key,
+  required_plan text not null default 'pro' check (required_plan in ('free', 'pro')),
+  updated_at timestamptz not null default now()
+);
+
+-- Seed with today's known-good policy (gpt-5-mini free, everything else
+-- pro) so applying this migration is a pure no-op for actual runtime
+-- behavior — the whole point is an admin can now change it going forward,
+-- not that behavior changes the moment this table is created.
+insert into public.hosted_model_plans (model, required_plan) values
+  ('gpt-5-mini', 'free'),
+  ('gpt-5-4-mini', 'pro'),
+  ('gpt-oss-120b', 'pro'),
+  ('grok-4-1-fast-reasoning', 'pro'),
+  ('deepseek-v4-pro', 'pro'),
+  ('codestral-2501', 'pro'),
+  ('llama-4-maverick', 'pro'),
+  ('kimi-k2-7-code', 'pro'),
+  ('kimi-k2-6', 'pro')
+on conflict (model) do nothing;
+
+alter table public.hosted_model_plans enable row level security;
+-- no policies at all -> default deny for anon/authenticated; only
+-- service-role (which bypasses RLS entirely) can touch this table — same
+-- pattern as global_budget/user_subscription above. Both the hosted-model
+-- proxy routes (read) and the admin models page/action (read+write) already
+-- hold a service-role client.
+revoke all on public.hosted_model_plans from public, anon, authenticated;
+grant select, insert, update on public.hosted_model_plans to service_role;

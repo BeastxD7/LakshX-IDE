@@ -45,6 +45,27 @@ export async function updateUserCredit(formData: FormData) {
   revalidatePath("/admin", "layout");
 }
 
+/**
+ * Which plan a hosted model requires (hosted_model_plans, supabase/
+ * schema.sql) — was a hardcoded FREE_TIER_MODELS constant in lib/hosted-
+ * models.ts until this was added; moving a model between tiers is now this
+ * action, not a code change + redeploy. `requiredPlan` is constrained to the
+ * exact same values `user_subscription.plan`'s check constraint allows.
+ */
+export async function updateModelPlan(formData: FormData) {
+  await assertAdmin();
+  const model = String(formData.get("model") ?? "").trim();
+  const requiredPlan = String(formData.get("requiredPlan") ?? "");
+  if (!model) throw new Error("missing model");
+  if (requiredPlan !== "free" && requiredPlan !== "pro") throw new Error("invalid plan");
+
+  const admin = supabaseAdmin();
+  const { error } = await admin.from("hosted_model_plans").upsert({ model, required_plan: requiredPlan, updated_at: new Date().toISOString() });
+  if (error) throw new Error(error.message);
+
+  revalidatePath("/admin/models");
+}
+
 export async function updateGlobalCeiling(formData: FormData) {
   await assertAdmin();
   const ceiling = Number(formData.get("ceiling"));

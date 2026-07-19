@@ -3,7 +3,7 @@ import { after } from "next/server";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { cleanAzureError } from "../../../../../lib/upstream-error";
 import { computeCostUsd } from "../../../../../lib/model-pricing";
-import { CHAT_COMPLETIONS_MODELS, DEFAULT_MODEL, MODELS_REJECTING_STREAM_OPTIONS, getEffectivePlan, isModelAllowedForPlan } from "../../../../../lib/hosted-models";
+import { CHAT_COMPLETIONS_MODELS, DEFAULT_MODEL, MODELS_REJECTING_STREAM_OPTIONS, getEffectivePlan, getRequiredPlan, isPlanSufficient } from "../../../../../lib/hosted-models";
 
 export const runtime = "nodejs";
 // Agentic turns can run long (multi-tool-call loops) — this is the ceiling
@@ -86,8 +86,11 @@ export async function POST(req: NextRequest) {
   // not 429: this is an authorization gate, not a budget/rate one, and the
   // agent-side adapters (azure-responses.ts/openai-compat.ts) key off that
   // distinction to avoid conflating it with check_budget()'s cap.
-  const plan = await getEffectivePlan(supabase, userId);
-  if (!isModelAllowedForPlan(deployment, plan)) {
+  // Required plan is admin-configured (hosted_model_plans, editable at
+  // /admin/models) — never hardcoded — so moving a model between tiers is
+  // an admin action, not a code change.
+  const [plan, requiredPlan] = await Promise.all([getEffectivePlan(supabase, userId), getRequiredPlan(supabase, deployment)]);
+  if (!isPlanSufficient(plan, requiredPlan)) {
     return Response.json({ error: "model_requires_pro", model: deployment }, { status: 403 });
   }
 

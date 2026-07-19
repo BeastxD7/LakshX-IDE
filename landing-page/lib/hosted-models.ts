@@ -31,29 +31,39 @@ export const DEFAULT_MODEL = "gpt-5-mini";
 /**
  * Plan-gated model access (found missing entirely — reported live: a Free
  * user was able to select and bill against Grok/DeepSeek/Kimi/etc., not
- * just gpt-5-mini). Until this was added, both hosted-model routes only
- * checked "is this model deployed on Azure at all" (the sets above) —
- * NEVER "is this user's plan allowed to use it." check_budget() gates
- * DOLLAR spend per plan, but never gated WHICH model a request could name,
- * so a Free user's own $5 credit could be spent on any deployed model,
- * including ones meant to be Pro-exclusive.
+ * just gpt-5-mini). check_budget() gates DOLLAR spend per plan, but never
+ * gated WHICH model a request could name, so a Free user's own $5 credit
+ * could be spent on any deployed model, including ones meant to be
+ * Pro-exclusive.
  *
- * Free tier: gpt-5-mini only, matching the pricing page's own description
- * ("Everything in Free" + "the hosted LakshX model (gpt-5-mini)... no key
- * to manage" for Pro — Pro was never meant to unlock MORE models over
- * Free, just a bigger monthly allowance on the same model). Every other
- * currently-deployed model requires an active Pro subscription — there is
- * no Pro+ tier in the schema yet (`user_subscription.plan` only allows
- * 'free'/'pro'), so "Pro+" model exclusivity (Claude/Grok-4-full/GPT-5
- * full) is aspirational pricing-page copy, not something to gate on until
- * that tier actually exists.
+ * ADMIN-CONFIGURABLE, not hardcoded: which plan a model requires lives in
+ * the `hosted_model_plans` table (supabase/schema.sql), editable from
+ * /admin/models — moving a model between tiers is now an admin-panel
+ * action, not a code change + redeploy. `required_plan` mirrors
+ * `user_subscription.plan`'s check constraint exactly (only 'free'/'pro'
+ * exist today — there is no Pro+ tier in the schema yet, so "Pro+" model
+ * exclusivity on the pricing page is aspirational copy, not something to
+ * gate on until that tier is real).
  */
-export const FREE_TIER_MODELS = new Set(["gpt-5-mini"]);
+const PLAN_RANK: Record<"free" | "pro", number> = { free: 0, pro: 1 };
 
-/** True if `model` is usable on `plan` — the ONLY thing that can lift a
- * model out of FREE_TIER_MODELS today is an active Pro subscription. */
-export function isModelAllowedForPlan(model: string, plan: "free" | "pro"): boolean {
-  return plan === "pro" || FREE_TIER_MODELS.has(model);
+/**
+ * Admin-configured plan requirement for `model` (hosted_model_plans.
+ * required_plan) — fails CLOSED to 'pro' when no row exists yet (a newly
+ * deployed-but-not-yet-configured model is never accidentally
+ * Free-accessible by omission; an admin has to explicitly opt a model into
+ * Free).
+ */
+export async function getRequiredPlan(supabase: SupabaseClient, model: string): Promise<"free" | "pro"> {
+  const { data } = await supabase.from("hosted_model_plans").select("required_plan").eq("model", model).maybeSingle();
+  return data?.required_plan === "free" ? "free" : "pro";
+}
+
+/** True if `userPlan` meets or exceeds `requiredPlan` — a plain rank
+ * comparison so a future third tier is a one-line PLAN_RANK addition, not a
+ * new branching scheme. */
+export function isPlanSufficient(userPlan: "free" | "pro", requiredPlan: "free" | "pro"): boolean {
+  return PLAN_RANK[userPlan] >= PLAN_RANK[requiredPlan];
 }
 
 /**
