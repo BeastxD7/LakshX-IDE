@@ -49,14 +49,18 @@ export interface DownloadTarget {
 /** Bump the value for a platform every time a new file is uploaded to its
  * (stable) blob path — see the cache-busting note above. */
 const BLOB_VERSION: Record<Exclude<DownloadKey, "macIntel">, string> = {
-  // Rebuilt from commit d555a37 (CI run 29685210756) -- all three platforms
-  // from the same verified build, including the Dodo integration, pricing
-  // page, admin panel, 9 new hosted models, and the flaky-test fixes from
-  // this session. Same-day re-upload needs a genuinely distinct value each
-  // time, not the same date reused, per the cache-busting note above.
-  macArm: "2026-07-19-3",
-  windows: "2026-07-19-2",
-  linux: "2026-07-19-2",
+  // Rebuilt from commit dc321d2 (CI run 29689445744) -- all three platforms,
+  // including the budget-cap friendly-error/upgrade-link fix, the per-model
+  // admin usage analytics, and the per-file checkpoint Accept/Reject/Undo
+  // controls. macOS CI only zips the raw .app (see this file's own doc
+  // comment above); the .dmg came from the same manual create-dmg.ts run
+  // this session already exercised (ad-hoc codesign + dmgbuild), applied to
+  // this run's freshly downloaded .app rather than reused from the prior
+  // upload. Same-day re-upload needs a genuinely distinct value each time,
+  // not the same date reused, per the cache-busting note above.
+  macArm: "2026-07-19-4",
+  windows: "2026-07-19-3",
+  linux: "2026-07-19-3",
 };
 
 const withVersion = (url: string, version: string) => `${url}?v=${version}`;
