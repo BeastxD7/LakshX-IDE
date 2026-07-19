@@ -114,18 +114,29 @@ function addMsg(cls, text) {
 let reportSeq = 0;
 const pendingReportButtons = new Map();
 
-function addErrorMsg(text) {
+function addErrorMsg(text, isSessionExpired) {
   const el = addMsg("system error", text);
   const btn = document.createElement("button");
   btn.className = "report-error-btn";
-  btn.textContent = "Report";
-  const reportId = ++reportSeq;
-  btn.addEventListener("click", () => {
-    btn.disabled = true;
-    btn.textContent = "Sending…";
-    pendingReportButtons.set(reportId, btn);
-    vscode.postMessage({ type: "reportError", errorText: text, reportId });
-  });
+  if (isSessionExpired) {
+    // Reporting a session expiry to admin isn't useful — the one thing
+    // worth offering here is signing back in, not a diagnostic bundle.
+    btn.textContent = "Sign In";
+    btn.addEventListener("click", () => {
+      btn.disabled = true;
+      btn.textContent = "Opening…";
+      vscode.postMessage({ type: "lakshxLogin" });
+    });
+  } else {
+    btn.textContent = "Report";
+    const reportId = ++reportSeq;
+    btn.addEventListener("click", () => {
+      btn.disabled = true;
+      btn.textContent = "Sending…";
+      pendingReportButtons.set(reportId, btn);
+      vscode.postMessage({ type: "reportError", errorText: text, reportId });
+    });
+  }
   el.appendChild(btn);
   scrollBottom();
 }
@@ -2195,7 +2206,7 @@ function applyEvent(m, replaying) {
       break;
     }
     case "toolImage": applyToolImage(m); break;
-    case "system": m.isError ? addErrorMsg(m.text) : addMsg("system", m.text); break;
+    case "system": m.isError ? addErrorMsg(m.text, m.isSessionExpired) : addMsg("system", m.text); break;
     case "modeChanged":
       setModeUI(m.mode);
       if (m.auto) addMsg("system", `Plan complete — switched to ${m.mode} mode.`);
@@ -2557,7 +2568,7 @@ window.addEventListener("message", (e) => {
     }
     case "historyList": showHistory(m.chats); break;
     case "planReady": showPlanBar(m.path); break;
-    case "system": m.isError ? addErrorMsg(m.text) : addMsg("system", m.text); break;
+    case "system": m.isError ? addErrorMsg(m.text, m.isSessionExpired) : addMsg("system", m.text); break;
     case "addAttachment": addAttachment(m.attachment); break;
     // Voice mode (docs/research/14-voice-mode.md): insert-don't-send — text
     // lands at the caret for the user to review/edit, never auto-submitted.

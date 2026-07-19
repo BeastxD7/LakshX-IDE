@@ -145,6 +145,16 @@ export function streamMaxMs(): number {
 }
 
 /**
+ * Prefix marking an Error's message as "the hosted lakshx session expired,"
+ * so the extension's catch block (product/lakshx-chat/extension.js) can
+ * detect this specific case and render a Sign In action instead of a
+ * generic error/Report button. The extension is a separate, plain-JS
+ * package (no shared import boundary with this one), so it duplicates this
+ * exact literal — keep both in sync if this ever changes.
+ */
+export const SESSION_EXPIRED_SENTINEL = "__LAKSHX_SESSION_EXPIRED__:";
+
+/**
  * Builds a clean, user-facing message for a failed HTTP response — never
  * dumps a raw HTML error page (e.g. a platform-level 404/500 from an infra
  * layer in front of the actual app, which returns its own styled error page

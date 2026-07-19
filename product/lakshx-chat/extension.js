@@ -52,6 +52,14 @@ function isSafePushToTalkKey(descriptor) {
 // ---------- runtime discovery ----------
 const isWin = process.platform === "win32";
 
+// Twin of agent/src/providers/types.ts's SESSION_EXPIRED_SENTINEL — that
+// package is a separate plain-JS bundle with no shared import boundary with
+// this one, so the exact literal is duplicated; keep both in sync if it
+// ever changes. Marks an error thrown by the hosted-model adapter as "the
+// LakshX session expired," so the catch block below can offer a Sign In
+// action instead of a generic error/Report button.
+const SESSION_EXPIRED_SENTINEL = "__LAKSHX_SESSION_EXPIRED__:";
+
 /**
  * Locate the editor's own bundled ripgrep binary, so the agent's grep tool
  * works on machines with no system-wide `rg` install (which was the actual,
@@ -191,15 +199,19 @@ function clearLakshxToken() {
 }
 
 /**
- * Supabase access tokens expire in 1h with single-use ROTATING refresh
- * tokens — a naive "store the refresh token once" implementation silently
- * logs the user out the second time it's used, because the old one gets
- * invalidated the moment a new one is issued. Every refresh here persists
- * BOTH the new access token and the new rotated refresh token.
+ * Supabase access tokens expire after whatever `jwt_exp` is configured to on
+ * the project (bumped to 7 days — was the 1-hour default — specifically so
+ * a machine sleeping overnight doesn't strand a stale access token; see the
+ * session's own history for the real report that motivated this) with
+ * single-use ROTATING refresh tokens — a naive "store the refresh token
+ * once" implementation silently logs the user out the second time it's
+ * used, because the old one gets invalidated the moment a new one is
+ * issued. Every refresh here persists BOTH the new access token and the new
+ * rotated refresh token.
  *
- * Runs an immediate check on activation (covers "app was closed past the
- * 1h expiry, last session's access token is stale") plus a 5-minute poll
- * that only actually calls Supabase once within 10 minutes of expiry.
+ * Runs an immediate check on activation (covers "app was closed past
+ * expiry, last session's access token is stale") plus a 5-minute poll that
+ * only actually calls Supabase once within 10 minutes of expiry.
  */
 function scheduleLakshxRefresh(context) {
   async function tick() {
@@ -207,16 +219,23 @@ function scheduleLakshxRefresh(context) {
     if (!refreshToken) return;
     const expiresAt = Number((await context.secrets.get("lakshx.tokenExpiresAt")) ?? "0");
     if (expiresAt && expiresAt - Date.now() > 10 * 60 * 1000) return;
+    // Capture the token BEFORE attempting the refresh — on failure, this is
+    // the only credential left to authenticate the failure report itself
+    // (see uploadAuthEvent's doc comment for why that isn't guaranteed to
+    // succeed, and why that's an accepted gap rather than a bug).
+    const tokenBeforeRefresh = readProvidersJson().providers?.lakshx?.apiKey;
     try {
       const session = await lakshxAuth.refreshSession(refreshToken);
       saveLakshxToken(session.access_token);
       await context.secrets.store("lakshx.refreshToken", session.refresh_token);
       await context.secrets.store("lakshx.tokenExpiresAt", String(Date.now() + session.expires_in * 1000));
+      uploadAuthEvent("ide_refresh", true, session.access_token);
     } catch {
       // refresh token itself is dead (expired, or already-replayed after a
       // crash mid-rotation) — clear everything so the UI honestly shows
       // "logged out" instead of silently retrying against a dead token
       // forever.
+      uploadAuthEvent("ide_refresh", false, tokenBeforeRefresh);
       clearLakshxToken();
       await context.secrets.delete("lakshx.refreshToken");
       await context.secrets.delete("lakshx.tokenExpiresAt");
@@ -514,6 +533,31 @@ function feedbackDir() {
 function feedbackFile(date = new Date()) {
   const ym = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
   return path.join(feedbackDir(), `${ym}.jsonl`);
+}
+
+/**
+ * Cloud mirror of the IDE's own login/refresh events — previously this
+ * session's lifecycle had ZERO server-side visibility (only the separate
+ * admin web login was ever logged), which made a real "why did my session
+ * expire" report impossible to actually diagnose after the fact. Called
+ * from the lakshx:// URI handler (login) and scheduleLakshxRefresh (refresh,
+ * both outcomes) below.
+ *
+ * For a FAILED refresh specifically: `token` here is whatever access token
+ * is currently on disk, which may itself be stale — if it's also too far
+ * gone to authenticate this call, the event silently fails to record. That
+ * is an accepted gap (see the twin comment in
+ * landing-page/app/api/auth-event/route.ts), not a bug to work around here.
+ * Best-effort and fire-and-forget, same as every other telemetry call in
+ * this file — never let this surface to the user or block anything.
+ */
+function uploadAuthEvent(eventType, success, token) {
+  if (!token) return;
+  fetch("https://lakshx.in/api/auth-event", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ eventType, success }),
+  }).catch(() => {});
 }
 
 /**
@@ -1618,7 +1662,16 @@ class AgentViewProvider {
         });
         this.post({ type: "turnEnd", stopReason: res.stopReason });
       } catch (err) {
-        this.post({ type: "system", text: `error: ${err.message}`, isError: true });
+        if (err.message?.startsWith(SESSION_EXPIRED_SENTINEL)) {
+          this.post({
+            type: "system",
+            text: err.message.slice(SESSION_EXPIRED_SENTINEL.length),
+            isError: true,
+            isSessionExpired: true,
+          });
+        } else {
+          this.post({ type: "system", text: `error: ${err.message}`, isError: true });
+        }
         this.post({ type: "turnEnd", stopReason: "error" });
         // Only the specific "wedged process" timeout from AcpClient.request()
         // (see acp-client.js's PROMPT_REQUEST_TIMEOUT_MS watchdog) counts as
@@ -2571,6 +2624,7 @@ async function activate(context) {
         saveLakshxToken(parsed.access_token);
         context.secrets.store("lakshx.refreshToken", parsed.refresh_token);
         context.secrets.store("lakshx.tokenExpiresAt", String(Date.now() + parsed.expires_in * 1000));
+        uploadAuthEvent("ide_login", true, parsed.access_token);
         vscode.window.showInformationMessage("Signed in to LakshX.");
         provider.post({ type: "lakshxAuthChanged", providers: readProviderState() });
         const readyState = readProviderState();

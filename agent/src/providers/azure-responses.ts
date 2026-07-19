@@ -37,7 +37,7 @@
  */
 import type { ProviderConfig } from "../config.js";
 import { IMAGE_UNSUPPORTED_PLACEHOLDER, isVisionCapableModel } from "../vision.js";
-import { fetchWithRetry, httpErrorMessage, sseLines, toolResultText } from "./types.js";
+import { fetchWithRetry, httpErrorMessage, SESSION_EXPIRED_SENTINEL, sseLines, toolResultText } from "./types.js";
 import type { ChatAdapter, ChatMessage, ToolResultPart, TurnRequest, TurnResult } from "./types.js";
 
 export class AzureResponsesAdapter implements ChatAdapter {
@@ -83,6 +83,17 @@ export class AzureResponsesAdapter implements ChatAdapter {
       { signal: req.signal },
     );
     if (!res.ok) {
+      // 401 from THIS proxy only ever means one of two things (see
+      // landing-page/app/api/lakshx-model/responses/route.ts): no bearer
+      // token at all, or auth.getUser() rejected it as invalid/expired —
+      // both are "you need to sign in again," never a bug worth showing raw.
+      // The sentinel prefix lets extension.js's catch block detect this
+      // specific case and offer a Sign In action instead of a generic error
+      // message / Report button (reporting a session expiry isn't useful).
+      if (res.status === 401) {
+        await res.text().catch(() => ""); // drain the body, nothing in it we need
+        throw new Error(`${SESSION_EXPIRED_SENTINEL}Your LakshX session has expired — sign in again to keep using the free hosted model.`);
+      }
       throw new Error(httpErrorMessage(this.cfg.baseUrl, res.status, await res.text()));
     }
 

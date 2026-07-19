@@ -454,43 +454,59 @@ revoke all on function public.record_budget_cap_hit(uuid, text) from public, ano
 grant execute on function public.record_budget_cap_hit(uuid, text) to service_role;
 
 -- -----------------------------------------------------------------------------
--- 3. OAuth login event logging — success/failure of the PKCE code exchange in
--- app/auth/callback/route.ts. user_id is nullable: a FAILED exchange means we
--- don't yet know who the user is (the failure happens before the session —
--- and therefore the user identity — exists), so failures are logged with a
+-- 3. Auth event logging — success/failure of every session-establishing or
+-- session-renewing event, not just the admin web login this table originally
+-- covered. user_id is nullable: a FAILED exchange/refresh sometimes means we
+-- don't yet know who the user is (or the refresh token was already dead, so
+-- there's no reliable identity to attach), so failures are logged with a
 -- null user_id rather than dropped, giving the admin dashboard visibility
--- into failure volume even though it can't attribute a failure to a person.
+-- into failure volume even though it can't attribute every failure to a
+-- person.
+--
+-- `event_type` distinguishes WHERE a login/refresh happened, which matters
+-- for actually diagnosing session problems (e.g. "the IDE's background
+-- refresh keeps failing" vs "the admin web login is fine") — see
+-- product/lakshx-chat/extension.js's scheduleLakshxRefresh() and the
+-- lakshx:// URI handler for the ide_refresh / ide_login call sites, and
+-- app/auth/callback/route.ts for admin_web_login.
 -- -----------------------------------------------------------------------------
 create table if not exists public.auth_events (
   id bigint generated always as identity primary key,
   user_id uuid references auth.users(id) on delete cascade,
   success boolean not null,
+  event_type text not null default 'admin_web_login',
   created_at timestamptz not null default now()
 );
 create index if not exists auth_events_user_id_idx on public.auth_events(user_id);
 create index if not exists auth_events_created_at_idx on public.auth_events(created_at);
+create index if not exists auth_events_event_type_idx on public.auth_events(event_type);
 
 alter table public.auth_events enable row level security;
 -- no policies at all -> default deny for anon/authenticated; only
 -- service-role can touch this table. Writes happen exclusively via
--- record_auth_event() below, called from the auth callback route with the
--- service-role key (the SSR client used earlier in that route to exchange
--- the code is authenticated AS the signed-in user post-exchange, and cannot
--- call a service-role-only function).
+-- record_auth_event() below, called either from the admin auth callback
+-- route (service-role key directly — the SSR client used to exchange the
+-- code there is authenticated AS the signed-in user post-exchange, and
+-- cannot call a service-role-only function) or from the new /api/auth-event
+-- route on the IDE's behalf (same bearer-token pattern as /api/feedback,
+-- /api/agent-incident).
 
-create or replace function public.record_auth_event(p_user_id uuid, p_success boolean)
+-- `p_event_type` default matches the table's own default so the existing
+-- admin-callback call site (which never passed this argument) keeps working
+-- unchanged.
+create or replace function public.record_auth_event(p_user_id uuid, p_success boolean, p_event_type text default 'admin_web_login')
 returns void
 language plpgsql
 security definer
 set search_path = public
 as $$
 begin
-  insert into auth_events (user_id, success) values (p_user_id, p_success);
+  insert into auth_events (user_id, success, event_type) values (p_user_id, p_success, left(p_event_type, 50));
 end;
 $$;
 
-revoke all on function public.record_auth_event(uuid, boolean) from public, anon, authenticated;
-grant execute on function public.record_auth_event(uuid, boolean) to service_role;
+revoke all on function public.record_auth_event(uuid, boolean, text) from public, anon, authenticated;
+grant execute on function public.record_auth_event(uuid, boolean, text) to service_role;
 
 -- -----------------------------------------------------------------------------
 -- 4. Self-service usage RPC — backs an IDE-side "your usage" display. Unlike

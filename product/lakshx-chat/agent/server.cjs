@@ -19241,6 +19241,7 @@ function streamMaxMs() {
   const v = Number(process.env.LAKSHX_STREAM_MAX_MS);
   return Number.isFinite(v) && v > 0 ? v : 10 * 6e4;
 }
+var SESSION_EXPIRED_SENTINEL = "__LAKSHX_SESSION_EXPIRED__:";
 function httpErrorMessage(baseUrl, status, rawBody) {
   const trimmed = rawBody.trim();
   if (/^<!doctype html|^<html[\s>]/i.test(trimmed)) {
@@ -19492,6 +19493,10 @@ var AzureResponsesAdapter = class {
       { signal: req.signal }
     );
     if (!res.ok) {
+      if (res.status === 401) {
+        await res.text().catch(() => "");
+        throw new Error(`${SESSION_EXPIRED_SENTINEL}Your LakshX session has expired \u2014 sign in again to keep using the free hosted model.`);
+      }
       throw new Error(httpErrorMessage(this.cfg.baseUrl, res.status, await res.text()));
     }
     let text = "";
