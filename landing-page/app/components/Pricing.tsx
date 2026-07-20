@@ -4,6 +4,7 @@ import Link from "next/link";
 import { motion } from "framer-motion";
 import { Check } from "lucide-react";
 import CtaButton from "./CtaButton";
+import { UpgradeButton } from "../../components/pricing/UpgradeButton";
 
 const fadeUp = {
   hidden: { opacity: 0, y: 16 },
@@ -104,9 +105,6 @@ export default function Pricing() {
             variants={fadeUp}
             className="relative flex flex-col rounded-3xl border border-lakshx-violet/25 bg-gradient-to-b from-lakshx-violet-active/15 to-white p-8 text-ink-navy shadow-xl ring-1 ring-lakshx-violet/15 sm:p-10"
           >
-            <span className="absolute -top-3 right-8 rounded-full bg-gradient-to-r from-lakshx-violet-active to-lakshx-violet px-3 py-1 text-xs font-semibold text-white shadow-md">
-              Coming soon
-            </span>
             <h3 className="font-heading text-xl font-semibold text-ink-navy">Pro</h3>
             <p className="mt-1 text-sm text-ink-navy/50">For daily use on the hosted model</p>
             <div className="mt-6 flex items-baseline gap-1">
@@ -123,17 +121,7 @@ export default function Pricing() {
               ))}
             </ul>
 
-            {/*
-              No payment integration is wired up on the frontend yet — the
-              Dodo Payments backend is being built separately, in parallel.
-              This is a deliberate disabled/"coming soon" placeholder so the
-              visual affordance for the buy button exists now; once checkout
-              exists, swap `disabled` for a real `href`/`onClick` here and
-              this becomes a one-line change.
-            */}
-            <CtaButton variant="accent" size="lg" disabled className="mt-8 w-full">
-              Coming soon
-            </CtaButton>
+            <UpgradeButton />
           </motion.div>
         </motion.div>
       </div>
