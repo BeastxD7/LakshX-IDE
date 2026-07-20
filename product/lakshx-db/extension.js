@@ -247,6 +247,13 @@ function panelHtml(context, webview) {
     <div id="loading">Connecting and reading the schema&hellip;</div>
     <div id="error" hidden></div>
     <div id="diagramWrap" hidden>
+      <div id="diagramZoomControls">
+        <button id="diagramZoomOut" class="ghost" title="Zoom out">&minus;</button>
+        <span id="diagramZoomLevel">100%</span>
+        <button id="diagramZoomIn" class="ghost" title="Zoom in">+</button>
+        <button id="diagramZoomFit" class="ghost" title="Fit whole diagram in view">Fit</button>
+        <button id="diagramZoomReset" class="ghost" title="Reset zoom and pan">Reset</button>
+      </div>
       <div id="diagram"></div>
     </div>
     <div id="relPanel" hidden>

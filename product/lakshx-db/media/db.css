@@ -130,16 +130,62 @@ button.ghost:hover {
 #error { color: var(--error-fg); white-space: pre-wrap; }
 
 #diagramWrap {
+  position: relative;
   flex: 1;
   overflow: auto;
   padding: 8px 12px 20px;
+  /* Drag-to-pan (db.js) grabs this element directly — the cursor affordance
+     needs to live here, not on #diagram, since #diagram is only as big as
+     the (possibly huge) rendered SVG, while the draggable area is the
+     whole scrollable viewport including empty space around it. */
+  cursor: grab;
 }
+#diagramWrap.panning { cursor: grabbing; }
 #diagram {
   min-width: max-content;
+  /* transform: scale() (db.js) needs a fixed origin so zoom math (keeping
+     the point under the cursor stationary) stays predictable — without
+     this Chromium defaults to scaling from the element's center, which
+     drifts unrelated to scroll position. */
+  transform-origin: 0 0;
 }
 /* mermaid renders with theme:'dark', so no white card wrapper is needed —
    its own SVG background matches the panel. */
 #diagram svg { max-width: none; }
+
+/* Floating, not in the normal #toolbar flow — pinned to the corner of the
+   scrollable viewport itself (position: relative on #diagramWrap above) so
+   it stays reachable regardless of how far the diagram has been panned,
+   instead of scrolling away with the content. */
+#diagramZoomControls {
+  position: sticky;
+  top: 0;
+  left: 0;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: max-content;
+  padding: 4px 6px;
+  margin-bottom: 6px;
+  background: var(--bg, #0e1116);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+#diagramZoomControls button {
+  min-width: 22px;
+  padding: 2px 6px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+#diagramZoomLevel {
+  min-width: 38px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--muted);
+  user-select: none;
+}
 
 #relPanel {
   border-top: 1px solid var(--hairline);

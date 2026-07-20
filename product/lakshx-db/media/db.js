@@ -42,7 +42,129 @@
     dataError: document.getElementById("dataError"),
     tableWrap: document.getElementById("tableWrap"),
     dataTable: document.getElementById("dataTable"),
+    diagramZoomIn: document.getElementById("diagramZoomIn"),
+    diagramZoomOut: document.getElementById("diagramZoomOut"),
+    diagramZoomFit: document.getElementById("diagramZoomFit"),
+    diagramZoomReset: document.getElementById("diagramZoomReset"),
+    diagramZoomLevel: document.getElementById("diagramZoomLevel"),
   };
+
+  // ---------- ER diagram pan/zoom ----------
+  // Large schemas render a Mermaid SVG far bigger than the viewport (er:
+  // {useMaxWidth:false} — see below), and the panel used to rely solely on
+  // native overflow:auto scrollbars for navigating it: no zoom at all, and
+  // no way to pan without a horizontal-scroll-capable mouse/trackpad
+  // (plain vertical wheel scroll never touches scrollLeft). This block adds
+  // wheel-zoom, Shift+wheel horizontal scroll, and click-drag panning —
+  // scrollLeft/scrollTop are the source of truth for pan position (not a
+  // CSS translate), so the existing native scrollbars stay in sync and
+  // still work as a fallback.
+  const ZOOM_MIN = 0.1;
+  const ZOOM_MAX = 4;
+  const ZOOM_STEP = 1.2;
+  let diagramZoom = 1;
+
+  function applyDiagramZoom() {
+    el.diagram.style.transform = `scale(${diagramZoom})`;
+    el.diagramZoomLevel.textContent = `${Math.round(diagramZoom * 100)}%`;
+  }
+
+  // Keeps the point currently under (originX, originY) — viewport-relative
+  // coordinates, e.g. the cursor position or the wrap's own center —
+  // visually stationary while the scale changes, by solving for the new
+  // scrollLeft/scrollTop that keeps (contentX, contentY) under that same
+  // viewport point. Without this, zooming recenters on the diagram's
+  // top-left corner (scale's transform-origin), which reads as the diagram
+  // "jumping" out from under the cursor on every scroll-to-zoom tick.
+  function zoomTo(nextZoom, originX, originY) {
+    const clamped = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, nextZoom));
+    if (clamped === diagramZoom) return;
+    const wrap = el.diagramWrap;
+    const contentX = (wrap.scrollLeft + originX) / diagramZoom;
+    const contentY = (wrap.scrollTop + originY) / diagramZoom;
+    diagramZoom = clamped;
+    applyDiagramZoom();
+    wrap.scrollLeft = contentX * diagramZoom - originX;
+    wrap.scrollTop = contentY * diagramZoom - originY;
+  }
+
+  function resetDiagramZoom() {
+    diagramZoom = 1;
+    applyDiagramZoom();
+    el.diagramWrap.scrollLeft = 0;
+    el.diagramWrap.scrollTop = 0;
+  }
+
+  function fitDiagramToView() {
+    // #diagram's own (unscaled) content box — divide out any zoom already
+    // applied so this is the diagram's true native size, not its current
+    // on-screen size.
+    const contentWidth = el.diagram.scrollWidth / diagramZoom;
+    const contentHeight = el.diagram.scrollHeight / diagramZoom;
+    if (!contentWidth || !contentHeight) return;
+    const wrap = el.diagramWrap;
+    const next = Math.min(ZOOM_MAX, (wrap.clientWidth - 16) / contentWidth, (wrap.clientHeight - 16) / contentHeight);
+    diagramZoom = Math.max(ZOOM_MIN, next);
+    applyDiagramZoom();
+    wrap.scrollLeft = 0;
+    wrap.scrollTop = 0;
+  }
+
+  el.diagramZoomIn.addEventListener("click", () => {
+    const wrap = el.diagramWrap;
+    zoomTo(diagramZoom * ZOOM_STEP, wrap.clientWidth / 2, wrap.clientHeight / 2);
+  });
+  el.diagramZoomOut.addEventListener("click", () => {
+    const wrap = el.diagramWrap;
+    zoomTo(diagramZoom / ZOOM_STEP, wrap.clientWidth / 2, wrap.clientHeight / 2);
+  });
+  el.diagramZoomFit.addEventListener("click", fitDiagramToView);
+  el.diagramZoomReset.addEventListener("click", resetDiagramZoom);
+
+  el.diagramWrap.addEventListener(
+    "wheel",
+    (ev) => {
+      if (ev.ctrlKey || ev.metaKey) {
+        // Trackpad pinch-zoom arrives as a ctrl-modified wheel event in
+        // Chromium; an explicit ctrl/cmd+wheel is the conventional
+        // "zoom, not scroll" gesture on the other input devices too.
+        ev.preventDefault();
+        const rect = el.diagramWrap.getBoundingClientRect();
+        zoomTo(diagramZoom * (ev.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP), ev.clientX - rect.left, ev.clientY - rect.top);
+      } else if (ev.shiftKey) {
+        // A plain mouse's wheel only ever produces vertical deltaY — without
+        // this, anyone without a horizontal-scroll trackpad/mouse had no
+        // way to pan sideways at all (the exact reported bug). Shift+wheel
+        // for horizontal scroll is the same convention browsers themselves
+        // use for overflowing content.
+        ev.preventDefault();
+        el.diagramWrap.scrollLeft += ev.deltaY;
+      }
+      // else: plain wheel — leave native vertical scrolling alone.
+    },
+    { passive: false }
+  );
+
+  // Click-drag panning — skipped on a text/interactive-selection modifier
+  // (Cmd/Ctrl+drag) so text under the diagram (mermaid still renders real
+  // <text> nodes) stays selectable, and skipped for anything but the
+  // primary mouse button.
+  let dragState = null;
+  el.diagramWrap.addEventListener("mousedown", (ev) => {
+    if (ev.button !== 0 || ev.metaKey || ev.ctrlKey) return;
+    dragState = { startX: ev.clientX, startY: ev.clientY, startScrollLeft: el.diagramWrap.scrollLeft, startScrollTop: el.diagramWrap.scrollTop };
+    el.diagramWrap.classList.add("panning");
+  });
+  window.addEventListener("mousemove", (ev) => {
+    if (!dragState) return;
+    el.diagramWrap.scrollLeft = dragState.startScrollLeft - (ev.clientX - dragState.startX);
+    el.diagramWrap.scrollTop = dragState.startScrollTop - (ev.clientY - dragState.startY);
+  });
+  window.addEventListener("mouseup", () => {
+    if (!dragState) return;
+    dragState = null;
+    el.diagramWrap.classList.remove("panning");
+  });
 
   // Data-view state. `collections` is populated from every schema payload so
   // the Data tab's dropdown always reflects the current connection. The rest
@@ -374,6 +496,11 @@
       if (seq !== renderSeq) return; // a newer refresh landed while this one was rendering — drop the stale result
       el.diagram.innerHTML = svg;
       showOnly("diagramWrap");
+      // A fresh diagram (new connection, or Refresh re-reading the schema)
+      // may be a completely different size than whatever was previously
+      // panned/zoomed to — start every new render at a clean 1:1 view
+      // rather than carrying over a stale scale/scroll position.
+      resetDiagramZoom();
     } catch (e) {
       showOnly("error");
       el.error.textContent = "Couldn't render the diagram: " + (e && e.message ? e.message : String(e));

@@ -108,8 +108,14 @@ html, body {
   background: var(--bg);
   color: var(--fg);
 }
+/* Opaque, not rgba() — same reasoning as the fix directly above this rule:
+   the open <option> list renders on its own OS-level surface with nothing
+   reliable behind it, so a translucent background composites against
+   whatever that surface actually is (sometimes light, not the workbench's
+   dark theme), leaving light-orange text unreadable. This is the same
+   16%-orange-over-#0e1116 tint, pre-blended into one opaque hex value. */
 #modeSelect option[value="royal"] {
-  background: rgba(255, 122, 89, 0.16);
+  background: #352221;
   color: #ffb08a;
 }
 
