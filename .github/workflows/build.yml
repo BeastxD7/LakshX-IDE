@@ -129,12 +129,25 @@ jobs:
           NPM_CONFIG_AUDIT: false
           NPM_CONFIG_FUND: false
 
+      # BUILD_SOURCEVERSION is gulpfile.vscode.ts's own escape hatch
+      # (build/lib/getVersion.ts checks it FIRST, before falling back to
+      # `git rev-parse` INSIDE upstream/ — which is a separately fetched,
+      # pinned code-oss checkout, so that fallback always yields the same
+      # constant commit for every LakshX build regardless of what we
+      # actually shipped). Setting it here stamps product.json's `commit`
+      # field with LakshX's own SHA instead — the update-check protocol
+      # (landing-page/app/api/update/.../route.ts) round-trips this value
+      # to tell "already latest" from "update available", which is
+      # meaningless if every build reports the same commit. Must be the
+      # full 40-char SHA or getVersion.ts's regex rejects it silently and
+      # falls back to the useless upstream one anyway.
       - name: Package
         shell: bash
         working-directory: upstream
         run: npm run gulp vscode-${{ matrix.target }}-min
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUILD_SOURCEVERSION: ${{ github.sha }}
 
       - name: Archive (macOS)
         if: runner.os == 'macOS'

@@ -530,6 +530,11 @@ try {
 	if ($LASTEXITCODE -ne 0) { Die 'upstream npm ci failed.' }
 
 	Write-Phase "5/8 Package (upstream: npm run gulp vscode-$Target-min)"
+	# BUILD_SOURCEVERSION stamps product.json's `commit` with THIS repo's
+	# SHA, not upstream/'s pinned code-oss one — see build.yml's matching
+	# step and build-macos.sh's for the full reasoning (the auto-update
+	# check needs a per-LakshX-build-distinct commit value).
+	$env:BUILD_SOURCEVERSION = (git -C $RepoRoot rev-parse HEAD).Trim()
 	& npm run gulp "vscode-$Target-min"
 	if ($LASTEXITCODE -ne 0) { Die 'gulp min build failed.' }
 

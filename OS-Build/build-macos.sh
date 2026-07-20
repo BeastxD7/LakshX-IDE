@@ -167,7 +167,13 @@ phase "4/8 Install upstream dependencies (upstream: npm ci)"
 
 # 5. Package (gulp min build)
 phase "5/8 Package (upstream: npm run gulp vscode-${TARGET}-min)"
-( cd upstream && npm run gulp "vscode-${TARGET}-min" )
+# BUILD_SOURCEVERSION stamps product.json's `commit` with THIS repo's SHA —
+# see build.yml's matching step for why (upstream/'s own `git rev-parse`
+# would otherwise stamp the pinned code-oss commit, constant across every
+# LakshX build, which the auto-update check can't tell apart). Read from
+# the repo root (SCRIPT_DIR/.., not upstream/, which is a separate nested
+# checkout) so a local build stamps the same kind of value CI does.
+( cd upstream && BUILD_SOURCEVERSION="$(git -C "${SCRIPT_DIR}/.." rev-parse HEAD)" npm run gulp "vscode-${TARGET}-min" )
 
 [ -d "$APP_BUILD_DIR" ] || die "Build output missing: ${APP_BUILD_DIR}"
 APP_NAME="$(cd "$APP_BUILD_DIR" && ls -d *.app 2>/dev/null | head -1 || true)"

@@ -163,7 +163,12 @@ phase "4/8 Install upstream dependencies (upstream: npm ci)"
 )
 
 phase "5/8 Package (upstream: npm run gulp vscode-${TARGET}-min)"
-( cd upstream && npm run gulp "vscode-${TARGET}-min" )
+# BUILD_SOURCEVERSION stamps product.json's `commit` with THIS repo's SHA,
+# not upstream/'s pinned code-oss one — see build.yml's matching step and
+# build-macos.sh's for the full reasoning (the auto-update check needs a
+# per-LakshX-build-distinct commit value, which upstream/'s own git history
+# can never provide).
+( cd upstream && BUILD_SOURCEVERSION="$(git -C "${REPO_ROOT}" rev-parse HEAD)" npm run gulp "vscode-${TARGET}-min" )
 
 # 6 + 7: two SEPARATE gulp invocations — prepare-deb must fully finish before
 # build-deb starts (build.yml:164-190 documents the race in detail).
