@@ -77,6 +77,59 @@ const BUDGET_CAP_SENTINEL = "__LAKSHX_BUDGET_CAP__:";
 // budget-cap hit.
 const MODEL_REQUIRES_PRO_SENTINEL = "__LAKSHX_MODEL_REQUIRES_PRO__:";
 
+// ---------- in-app update badge ----------
+// VS Code's built-in updater (product.overrides.json's updateUrl, see
+// landing-page/app/api/update/[platform]/[quality]/[commit]/route.ts) has
+// no extension-facing API to observe ITS check result — IUpdateService is
+// workbench-internal only, so there's no `vscode.update.*` namespace an
+// extension can read. Rather than patch VS Code core just to expose that
+// state (real, but bigger surgery than this needs), this extension does
+// its own independent check against the SAME endpoint, using the SAME
+// commit identity — so "is a newer LakshX build available" is answered
+// consistently either way, and the panel can show a real, clickable
+// top-of-panel badge (the closest thing this thin-fork architecture has to
+// a title-bar slot — extensions can't add native UI to the actual window
+// chrome, only into their own contributed views).
+function getInstalledCommit() {
+  try {
+    const product = JSON.parse(fs.readFileSync(path.join(vscode.env.appRoot, "product.json"), "utf8"));
+    return typeof product.commit === "string" ? product.commit : null;
+  } catch {
+    return null;
+  }
+}
+
+// Mirrors the exact platform id strings each updateService.*.ts asset ID
+// uses (upstream/src/vs/platform/update/electron-main/updateService.*.ts)
+// — the landing-page route keys off these same values, so this MUST stay
+// in sync with that route's `platforms` map, not just be "a reasonable
+// guess".
+function updatePlatformId() {
+  if (process.platform === "darwin") return `darwin-${process.arch}`;
+  if (process.platform === "linux") return `linux-${process.arch}`;
+  if (process.platform === "win32") return `win32-${process.arch}`;
+  return null;
+}
+
+/**
+ * Returns the update payload ({version, productVersion, url, ...}) if a
+ * newer build exists, or null if already current / the check failed for
+ * any reason (offline, misconfigured, unrecognized platform) — this is a
+ * best-effort background check, never worth surfacing an error for.
+ */
+async function checkForLakshxUpdate() {
+  const commit = getInstalledCommit();
+  const platform = updatePlatformId();
+  if (!commit || !platform) return null;
+  try {
+    const res = await fetch(`https://lakshx.in/api/update/${platform}/stable/${commit}`);
+    if (res.status !== 200) return null; // 204 = already latest; anything else = don't know, stay quiet
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Locate the editor's own bundled ripgrep binary, so the agent's grep tool
  * works on machines with no system-wide `rg` install (which was the actual,
@@ -2329,6 +2382,24 @@ class AgentViewProvider {
         this.post({ type: "lakshxModelsResult", result });
         break;
       }
+      case "checkForLakshxUpdate": {
+        const update = await checkForLakshxUpdate();
+        this.post({ type: "lakshxUpdateResult", update });
+        break;
+      }
+      // The badge's click action: reuses VS Code's OWN built-in update
+      // command (same one Help > Check for Updates runs) rather than
+      // reimplementing download/apply here — this gets the real
+      // native flow (silent-apply where the platform's signing situation
+      // allows it, an external download otherwise) for free, and stays a
+      // single source of truth for what "applying an update" means.
+      case "applyLakshxUpdate":
+        // Real command id is 'update.checkForUpdate' (singular) — see
+        // upstream/src/vs/workbench/contrib/update/browser/update.
+        // contribution.ts's CheckForUpdateAction; do not "fix" this to the
+        // more natural-sounding plural, it silently no-ops instead.
+        vscode.commands.executeCommand("update.checkForUpdate");
+        break;
       case "reportError": {
         // Scoped to the hosted lakshx model + signed-in users only, matching
         // uploadFeedbackEvent's privacy scoping — a BYOK user's own prompts/
@@ -2602,6 +2673,9 @@ ${hasMd ? `<link rel="stylesheet" href="${mdcss}">` : ""}
       <option value="royal" title="Full autonomy, full machine access — no floor, no restrictions. Logged and checkpointed, not blocked.">Royal</option>
     </select>
     <div class="spacer"></div>
+    <button id="updateBadge" class="update-badge" hidden title="A new version of LakshX is available — click to update">
+      <span id="updateBadgeText">Update available</span>
+    </button>
     <button id="historyBtn" class="ghost" title="Chat history" aria-label="Chat history">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/></svg>
     </button>

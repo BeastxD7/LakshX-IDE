@@ -2262,6 +2262,20 @@ document.getElementById("historyBtn").addEventListener("click", () => {
 });
 document.getElementById("historyClose").addEventListener("click", () => (historyPanel.hidden = true));
 
+// ---------- update badge ----------
+const updateBadge = document.getElementById("updateBadge");
+const updateBadgeText = document.getElementById("updateBadgeText");
+updateBadge.addEventListener("click", () => {
+  // Hands off to VS Code's own native update.checkForUpdates flow
+  // (extension.js) — from here on, progress/errors surface through its
+  // own notification toast and gear-icon badge, not this one, so there's
+  // nothing further for this badge to track. Hide it rather than leaving
+  // it in a permanently-disabled "Checking…" state with no way to know
+  // when that's resolved.
+  updateBadge.hidden = true;
+  vscode.postMessage({ type: "applyLakshxUpdate" });
+});
+
 function showHistory(chats) {
   historyBody.innerHTML = chats.length ? "" : `<div class="hint">No saved chats yet.</div>`;
   for (const c of chats) {
@@ -2588,6 +2602,9 @@ window.addEventListener("message", (e) => {
       // below) once it arrives. Only relevant once signed in (lakshx in
       // providers); a signed-out user has nothing to fetch this with.
       if (m.models.providers.includes("lakshx")) vscode.postMessage({ type: "getLakshxModels" });
+      // Independent of any provider/sign-in state — the update check is
+      // about the app itself, not the hosted model account.
+      vscode.postMessage({ type: "checkForLakshxUpdate" });
       break;
     }
     case "replay":
@@ -2765,6 +2782,17 @@ window.addEventListener("message", (e) => {
       // rendered enabled; this is what actually applies the disabled state
       // once real data exists.
       refreshLakshxTopBarOptions();
+      break;
+    }
+    case "lakshxUpdateResult": {
+      // checkForLakshxUpdate() (extension.js) resolves null both when
+      // already on the latest build AND on any failure (offline, endpoint
+      // down) — both cases mean "nothing to show", not an error worth
+      // surfacing.
+      if (m.update?.productVersion) {
+        updateBadgeText.textContent = `Update to ${m.update.productVersion}`;
+        updateBadge.hidden = false;
+      }
       break;
     }
     case "reportErrorDone": {

@@ -79,6 +79,30 @@ html, body {
   border-bottom: 1px solid var(--hairline);
 }
 #topbar > button { flex-shrink: 0; }
+/* Sits right of the mode select's spacer, i.e. the right-aligned cluster
+   of #topbar — the closest thing this thin-fork architecture has to a
+   title-bar "update available" slot, since extensions can't add UI to the
+   actual native window chrome (see extension.js's checkForLakshxUpdate
+   doc comment). Solid accent fill, not a `.ghost` outline like the other
+   topbar buttons — this one action is meant to stand out, not blend in. */
+.update-badge {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border: none;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 0.15s;
+}
+.update-badge:hover { filter: brightness(1.12); }
+.update-badge:disabled { cursor: default; filter: none; opacity: 0.7; }
 #modeSelect {
   background: rgba(0, 0, 0, 0.25);
   color: var(--fg);
