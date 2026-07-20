@@ -2375,6 +2375,58 @@ const PROVIDERS = {
 let settingsState = { defaultModel: "", set: {} };
 const liveModels = {};
 
+// Populated from "lakshxModelsResult" (getLakshxModels → GET /api/lakshx-
+// model/list) — lakshxPlan is the signed-in user's actual plan ("free" |
+// "pro" | null before the first fetch resolves); lakshxModelPlans maps
+// model id -> its required plan ("free" | "pro"). Every hosted model
+// always SHOWS (see PROVIDERS.lakshx.models above) — this data only
+// decides labeling and whether an option is selectable, never whether it's
+// listed at all. Before the first fetch resolves, both are empty/null and
+// every model renders enabled with no plan label — a signed-in-but-not-
+// yet-fetched moment, not a real gate: the actual enforcement is always
+// server-side (chat/completions and responses routes), this is just UX.
+let lakshxPlan = null;
+let lakshxModelPlans = {};
+
+function isLakshxModelDisabled(model) {
+  return lakshxModelPlans[model] === "pro" && !!lakshxPlan && lakshxPlan !== "pro";
+}
+
+// Bare model id + optional " — Pro" suffix — used for the Settings
+// datalist, where the value is just the model id (no provider prefix).
+function lakshxModelLabel(model) {
+  return lakshxModelPlans[model] === "pro" ? `${model} — Pro` : model;
+}
+
+// "provider/model" + optional " — Pro" suffix — used for the top-bar
+// quick-select, whose option values are always the full "provider/model"
+// string.
+function lakshxOptionLabel(providerId, providerModel) {
+  if (providerId !== "lakshx") return `${providerId}/${providerModel}`;
+  return `${providerId}/${lakshxModelLabel(providerModel)}`;
+}
+
+// Rebuilds every `lakshx/*` <option> in the top-bar quick-select from
+// scratch (not just appends missing ones) — disabled/label state can
+// change once plan data arrives (nothing was known yet at "ready" time),
+// so a stale enabled option has to be replaced, not left alone. Preserves
+// whatever was previously selected if it still exists.
+function refreshLakshxTopBarOptions() {
+  const currentVal = modelEl.value;
+  [...modelEl.options].forEach((o) => {
+    if (o.value.startsWith("lakshx/")) o.remove();
+  });
+  for (const model of liveModels.lakshx ?? PROVIDERS.lakshx.models ?? []) {
+    const val = `lakshx/${model}`;
+    const opt = document.createElement("option");
+    opt.value = val;
+    opt.textContent = lakshxOptionLabel("lakshx", model);
+    opt.disabled = isLakshxModelDisabled(model);
+    if (val === currentVal) opt.selected = true;
+    modelEl.appendChild(opt);
+  }
+}
+
 function renderSettings() {
   const sel = document.getElementById("providerSelect");
   const firstSet = Object.keys(PROVIDERS).find((id) => settingsState.set?.[id]);
@@ -2393,7 +2445,11 @@ function renderSettings() {
     ${
       p.managed
         ? `<div class="field">
-      <label>Account ${isSet ? '<span class="pill">signed in</span>' : '<span class="muted">sign in to use the free model</span>'}</label>
+      <label>Account ${
+        isSet
+          ? `<span class="pill">signed in</span>${lakshxPlan ? ` <span class="pill">${lakshxPlan === "pro" ? "Pro" : "Free"}</span>` : ""}`
+          : '<span class="muted">sign in to use the free model</span>'
+      }</label>
       <button type="button" id="lakshxAuthBtn">${isSet ? "Sign Out" : "Sign In"}</button>
       ${isSet ? `<div id="lakshxUsage" class="muted">Loading usage&hellip;</div>` : ""}
     </div>`
@@ -2411,7 +2467,9 @@ function renderSettings() {
         value="${escapeHtml(currentDefault.startsWith(`${providerId}/`) ? currentDefault.slice(providerId.length + 1) : "")}"
       >
       <datalist id="modelSuggestions">
-        ${(liveModels[providerId] ?? p.models ?? []).map((m) => `<option value="${escapeHtml(m)}">`).join("")}
+        ${(liveModels[providerId] ?? p.models ?? [])
+          .map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(providerId === "lakshx" ? lakshxModelLabel(m) : m)}</option>`)
+          .join("")}
       </datalist>
     </div>
     <label class="check"><input type="checkbox" id="makeDefault" checked> Use as default model</label>
@@ -2510,20 +2568,25 @@ window.addEventListener("message", (e) => {
         }
       }
       for (const o of opts) {
+        const slash = o.indexOf("/");
+        const providerId = o.slice(0, slash);
+        const providerModel = o.slice(slash + 1);
         const opt = document.createElement("option");
         opt.value = o;
-        opt.textContent = o;
+        opt.textContent = lakshxOptionLabel(providerId, providerModel);
+        // No plan data yet at this point (getLakshxModels hasn't resolved —
+        // see below) — everything renders enabled here; refreshLakshxTopBarOptions()
+        // corrects disabled state once "lakshxModelsResult" arrives.
         if (o === selected) opt.selected = true;
         modelEl.appendChild(opt);
       }
       if (m.models.providers.length === 0 && messagesEl.querySelector(".empty")) {
         showEmpty(true);
       }
-      // Refreshes PROVIDERS.lakshx.models (and this same top-bar select)
-      // from the server's actual, admin-configured, plan-filtered list once
-      // it arrives — see the "lakshxModelsResult" case below. Only relevant
-      // once signed in (lakshx in providers); a signed-out user has nothing
-      // to fetch this with.
+      // Fetches the admin-configured plan requirement per model (labels +
+      // disables options — see refreshLakshxTopBarOptions/lakshxModelsResult
+      // below) once it arrives. Only relevant once signed in (lakshx in
+      // providers); a signed-out user has nothing to fetch this with.
       if (m.models.providers.includes("lakshx")) vscode.postMessage({ type: "getLakshxModels" });
       break;
     }
@@ -2673,34 +2736,35 @@ window.addEventListener("message", (e) => {
     }
     case "lakshxModelsResult": {
       // getModels() (lakshx-auth.js) resolves null on any failure (offline,
-      // expired session, proxy misconfigured) — leave PROVIDERS.lakshx.models
-      // at whatever it already was (the hardcoded free-tier default,
-      // gpt-5-mini) rather than clearing the picker down to nothing.
-      const available = m.result?.models?.filter((x) => x.available).map((x) => x.id) ?? [];
-      if (available.length) {
-        PROVIDERS.lakshx.models = available;
-        liveModels.lakshx = available;
+      // expired session, proxy misconfigured) — leave everything at
+      // whatever it already was (PROVIDERS.lakshx.models' hardcoded
+      // fallback list, no plan labels/disabling) rather than clearing the
+      // picker down to nothing.
+      //
+      // ALL hosted models always show, regardless of plan — filtering the
+      // list down to only what the current plan allows (the previous
+      // version of this) was wrong: a Free user should be able to SEE that
+      // Kimi/Grok/etc. exist and that they're Pro-gated, not have them
+      // silently disappear. What plan-awareness actually means here is
+      // labeling ("— Pro") and disabling selection, never hiding — the
+      // real enforcement is server-side regardless (chat/completions and
+      // responses routes), this is purely picker UX.
+      const models = m.result?.models ?? [];
+      if (models.length) {
+        lakshxPlan = m.result?.plan ?? null;
+        lakshxModelPlans = Object.fromEntries(models.map((x) => [x.id, x.requiredPlan]));
+        liveModels.lakshx = models.map((x) => x.id);
       }
       // Same pattern as "providerStatus" above for BYOK providers — only
       // matters if Settings happens to be open on the lakshx provider right
-      // now.
+      // now (relabels the datalist, and adds the account's Free/Pro pill
+      // next to "signed in").
       if (!settingsPanel.hidden && document.getElementById("providerSelect")?.value === "lakshx") renderSettings();
-      // The top-bar quick-select was already populated at "ready" time from
-      // the old hardcoded list — add any newly-available models to it now
-      // rather than waiting for a reload. Never REMOVES an option: if a
-      // model this user currently has selected became unavailable, the next
-      // request against it gets a clean upgrade prompt (MODEL_REQUIRES_PRO_
-      // SENTINEL handling, extension.js) instead of silently vanishing out
-      // from under them mid-session.
-      const existing = new Set([...modelEl.options].map((o) => o.value));
-      for (const model of available) {
-        const val = `lakshx/${model}`;
-        if (existing.has(val)) continue;
-        const opt = document.createElement("option");
-        opt.value = val;
-        opt.textContent = val;
-        modelEl.appendChild(opt);
-      }
+      // Rebuilds (not just appends to) the top-bar's lakshx/* options — at
+      // "ready" time nothing was known about plan yet, so everything
+      // rendered enabled; this is what actually applies the disabled state
+      // once real data exists.
+      refreshLakshxTopBarOptions();
       break;
     }
     case "reportErrorDone": {
